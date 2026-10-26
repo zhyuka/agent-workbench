@@ -5,159 +5,136 @@ description: "Adversarial, measurement-driven QA pass on a built web page before
 
 # QA audit: prove the page is right, don't eyeball it
 
-The builder keeps declaring "matches the design" after glancing at scaled screenshots, and glancing
-cannot see a 1px stray divider, a 12-vs-14px badge, a dark bar baked into an image *file*, or
-whether a "mobile overflow" is real or just a cropped screenshot. **QA is a different job from
-building: adversarial, exhaustive, and driven by measurement, run by someone other than the
-author.** Its output is a findings list, never a code edit.
+QA is a different job from building: adversarial, exhaustive, driven by measurement, and run by
+someone other than the author, because glancing at scaled screenshots cannot see a 1px stray
+divider, a 12-vs-14px badge or a bar baked into an image file. The pass is done when every section
+in scope has a measured verdict and the findings list is reported.
 
-Two hard rules up front:
-- **Measure, don't look.** Every visual claim is backed by a number.
+- **Measure, don't look.** Every visual claim is backed by a number and the command that produced it.
 - **Report-only.** This pass never edits the build. It emits defects; the fix goes back to whoever
-  builds, then QA runs again.
+  builds, then you re-run QA. A gate that also patches is not a gate.
 
-This skill ships no harness. It is a method; the recipes below use Playwright (Python) because it
-drives a real browser with true device emulation, but any tool that measures the live DOM and the
-rendered pixels will do. WHAT to look for is `references/bug-taxonomy.md` (groups A-L). HOW to look,
-and where looking fails, is `references/verification.md`.
+This file owns the procedure. How to look, and where looking fails, is `references/verification.md`;
+what to look for is `references/bug-taxonomy.md` (groups A-L); what each check proves, with a recipe
+for it, is `references/harness.md`. The expected values come from the design source. When you turn
+a recipe into a script, the script owns what a defect is: when a check's threshold or definition
+changes, edit the script, and when this file and the script disagree, the script wins.
 
-## Set up
+## The harness
 
-- **Audit a fresh production build, not the dev server.** Build, serve the output on a port of its
-  own, and audit that URL. A long-running dev server can serve stale CSS with fresh HTML. Never kill
-  a dev server someone else is using.
-- **Always pass the URL** to every probe. A default URL in a script audits whatever page that is,
-  not the one you changed.
-- **True device emulation, not a window size.** In Playwright, a context per width:
-  `browser.new_context(viewport={"width": w, "height": 900}, device_scale_factor=2,
-  is_mobile=w < 768, has_touch=w < 768)`. A bare window size can lay the page out at a different,
-  wider viewport, which makes a clean page look clipped on a phone.
-- **Every probe you write follows one exit convention: 0 clean, 1 findings, 2 could not run.** It
-  asserts its own preconditions (the page loaded, the viewport is the one asked for, the selector
-  matched at least one element) and aborts with 2 rather than pass. Make the abort distinct from a
-  finding; a probe whose abort exits 1 reads as a defect.
-- **Calibrate each probe** on one planted bad case and one known good case before trusting it.
+This skill ships no harness. It is a method; the recipes in `references/harness.md` use Playwright
+(Python) because it drives a real browser with true device emulation rather than a window size
+(`references/verification.md` §7), but any tool that measures the live DOM and the rendered pixels
+will do.
 
-## The measurements
+**Point it at a fresh production build, not the dev server.** Build, serve the output on a port of
+its own, and audit that URL. A long-running dev server can serve stale CSS with fresh HTML. Never
+kill a dev server someone else is using. **Always pass the URL** to every probe: a default URL in a
+script audits whatever page that is, not the one you changed.
 
-| check | how (Playwright recipe) | what it proves |
-|---|---|---|
-| overflow | per width: `document.documentElement.scrollWidth` vs `clientWidth`, plus every element whose `getBoundingClientRect().right` passes the viewport | real sideways scroll has offenders AND `scrollWidth > viewport`; with no offenders it was a screenshot artifact. A heading past the viewport fails even inside an `overflow: hidden` ancestor |
-| geometry | `getBoundingClientRect()` and `getComputedStyle()` (font-size, padding, border, radius) per selector | equal heights, stray borders, badge sizing, spacing against the design's numbers |
-| screenshots | `page.screenshot(full_page=True)` or `locator.screenshot()` per section, per width | a section-by-section diff against the design node's own export |
-| images in the file | scan every committed image with PIL: rows or columns at an edge that are uniform and dark or light | a bar or letterbox baked into the FILE; element geometry reads gap 0 because the `<img>` fills its box |
-| assets | `page.on("response")` for status >= 400, then every `img` with `naturalWidth == 0` and every CSS `background-image` URL fetched, after scrolling the page to trigger lazy loads | a missing file passes the build; it only 404s in the browser. It proves an image loads, not that it is the right image |
-| in-page links | click each in-page scroll link and assert its target's top lands just under the sticky header | anchors guessed at build time and never clicked |
-| keyboard | press Tab through the page, read `document.activeElement`, `matches(":focus-visible")` and the ring's computed outline or box-shadow at each stop; open each collapsed menu and unselected tab and walk what opened | a missing ring, a ring clipped by an `overflow: hidden` ancestor, a ring invisible against its own band, a hidden menu that is still tabbable |
-| states | force the state over CDP (`CSS.forcePseudoState` with `["hover"]`, Chromium only), screenshot rest and forced, diff | every hover, focus, active and selected state against the design's variant |
-| diff | mean absolute difference AND the worst row band, at native resolution, on two crops of the same section | a 1px hairline barely moves the mean but spikes one row; a mean-only diff calls it a match |
-| copy | the rendered text per element against the design's text, with zero-width characters stripped and whitespace folded | wrong, missing or placeholder copy |
-| contrast | WCAG ratio of each text leaf's colour against the pixels under its glyph boxes, both themes | text under its AA floor, especially over photos and gradients |
+Every probe follows one exit convention: 0 clean, 1 findings, 2 could not run. It asserts its own
+preconditions (the page loaded, the viewport is the one asked for, the selector matched at least one
+element) and aborts with 2 rather than pass. Read the output as well as the code: a probe whose
+abort exits 1 reads as a defect, and one that did not run is not clean.
 
-A forced state needs calibrating: a synthetic mouse move can deliver `:hover` in one headless mode
-and nothing in another, and a probe that measures nothing reports "no change on hover", a false
-defect. Force the element and every ancestor, park the mouse off the page, and check the probe on an
-element whose hover is known to work first.
+### The ratchet: what is new on this tree
+
+On a site with known, accepted defects, keep a baseline file of the findings each proven check
+already has, keyed by the check and route. Run the checks against it first, for the changed page's
+routes, and for every route when the change touches a global stylesheet, the layout template or a
+shared component.
+
+- A finding not in the baseline is new on this tree: a BLOCKER.
+- A baselined finding was already there when the baseline was taken. It is still a defect.
+- A route with no baseline (a new page) is NOT COMPARED, so every finding there is new.
+- Keep each line's shape. The key is the check and its arguments without host, port or output path,
+  so another width or flag reads NOT COMPARED.
+- A baselined finding this tree no longer has is gone. QA never writes the baseline. When the last
+  round passes, the builder re-runs the same lines to refresh it and commits it. Its diff may only
+  remove findings; one added there is a new defect being hidden, so fix it or ask.
 
 ## Procedure
 
-1. **Ground on the design per section.** Pull the expected values (sizes, spacing, type, colours,
-   copy, every state and annotation) from the design source for both the desktop and the phone
-   frame. Without them "looks right" creeps back in.
-2. **Run the measurements** on the built page at every width the design specifies: overflow,
-   images, assets, in-page links, geometry against the pulled numbers. Record the numbers. **Run
-   assets and in-page links on every page, not just the one you changed.**
+1. **Ground on the design per section.** Start from the page's build plan when there is one: its
+   required sections, states and rulings. With no plan, pull the expected values (sizes, spacing,
+   type, colours, copy, every state and annotation) from the design source, taking both frames,
+   desktop and phone, from the section: the Figma MCP cannot reach a phone frame from its desktop
+   frame's node.
+2. **Run the measurements** (`references/harness.md`) on the built page: overflow at every width the
+   design specifies, images, assets, in-page links, geometry, corners, and the design's numbers as
+   assertions. Record the numbers. A corner flag is a question: open its crop before calling it a
+   leak. Run assets and in-page links on every page, not only the one you changed. Then measure
+   contrast under the glyphs of the text over photos or gradients; a builder's proof covers only the
+   selectors it named.
 3. **Diff every section** at each design width against its design node: copy verbatim, type sizes,
-   colours, chip and badge sizing, active-vs-dimmed states, arrow presence and type, dividers, equal
-   heights, image full-bleed. No section is "passed" without an explicit verdict. If you want a
-   designer's read of each section, spawn one `section-reviewer` agent per section and width with
-   the two pictures, and mark each finding as caught by both, by the reviewer only, or by
-   measurement only.
-4. **Run the blind-spot checks** (`references/verification.md` §2): motion quality, illustration
-   fidelity at native resolution, undesigned affordances, and container changes that silently
-   disable a child. Measurement without them produces a confident false pass; use the page as a
-   person would, too.
+   colours, chip and badge sizing, active versus dimmed states, arrow presence and type, dividers,
+   equal heights, full-bleed images. No section passes without an explicit verdict. Each section the
+   plan requires needs its own recorded verdict taken on the build you audit; one with none is a
+   finding. Where the builder recorded a numeric verdict (a saved diff with its exit codes and worst
+   delta), read it rather than re-deriving a weaker one, and check the section was not edited since.
+4. **Run the four blind-spot checks** (`references/verification.md` §2); without them, measurement
+   produces a confident false pass.
 5. **Keyboard and accessibility**: `references/verification.md` §5.
-6. **Build hygiene**: the served files match the source, no orphaned assets, the project's build and
-   check commands exit 0 (`references/verification.md` §6).
-7. **Report** (format below). Run the `recall` skill on each finding's selector and design node id
-   first: one already ruled, ticketed or withdrawn is not new. Hand fixes back to the builder and
-   **re-run QA after the fix**. Stop at zero in-scope blockers or after round 3, whichever comes
-   first; what is left goes to the tracker (`references/verification.md` §4).
-
-### A baseline of known findings
-
-On a site with known, accepted defects, keep a baseline file of the findings each proven check
-already has, keyed by the check and route (without host or port). Run the checks against it: a
-finding not in the baseline is new on this tree and a blocker; a baselined finding is still a
-defect; a route with no baseline is NOT COMPARED, so every finding there is new. QA never writes the
-baseline. When the last round passes, the builder refreshes it, and its diff may only remove
-findings; one added there is a new defect being hidden.
+6. **Build hygiene and the gate**: the served files match the source, no orphaned static files, and
+   the project's build and check commands exit 0 (run them in the background and read the tail):
+   `references/verification.md` §6.
+7. **Report** (below). Run the `recall` skill on each finding's selector and design node id first:
+   one already ruled, ticketed or withdrawn is not new. List the notable defects for the caller to
+   file in the tracker, hand fixes back to the builder, and re-run QA after the fix. Stop at zero
+   in-scope blockers or after round 3, whichever comes first, with the project's check command at
+   exit 0; polish and what is left go to the tracker (`references/verification.md` §4). Findings are
+   re-derived each round, never kept in a hand-maintained list.
 
 ## The checklist
 
-`references/bug-taxonomy.md` is the full list of defect classes. **Run the built page against all of
-it, every group, top to bottom.** These groups are the ones most often missed:
+Run the built page against every group of `references/bug-taxonomy.md`, top to bottom. These are the
+groups this pass most often misses, so they get named here; the entries live in the taxonomy.
 
-- **Motion and interaction parity (group D).** Stray motion not in the prototype; missing motion
-  that sibling pages have; the same element behaving differently across pages;
+- **Motion and interaction parity (group D, the most-missed).** Stray motion not in the prototype,
+  missing motion that sibling pages have, the same element behaving the same everywhere, and
   `prefers-reduced-motion` honoured everywhere.
 - **Cross-page consistency (group H).** For each repeated class, compare its markup and computed
   styles across every page that uses it; the majority is the convention and the minority is the
-  finding. Record intentional deltas.
+  finding. Then diff spacing, heights, hover and tokens on what survives, and record intentional
+  deltas.
 - **Functional wiring (group E).** Click, keyboard-activate and empty-data every control; a filter,
-  link or pager that looks right but does nothing is a defect. Confirm data comes from the live
-  source, not a stale fixture.
+  link or pager that looks right but does nothing is a defect. Gate affordances with no data, and
+  confirm data comes from the live source, not a stale fixture.
 - **Design tokens (group C) and accessibility depth (group G).** No raw hex, off-scale radius or
   off-scale type; grep for them. Code text uses the mono token. No colour-only status, AA contrast in
-  both themes, ARIA, alt text, `aria-live`, captions.
+  both themes, and ARIA, alt text, `aria-live` and captions.
 - **Component states and annotations.** Every state the design defines is implemented, and every
-  annotation is honoured or has a recorded decision.
+  annotation honoured. A hover, selected or disabled state in the design that is missing or
+  approximated is a defect, and an annotation with no build behaviour or recorded decision is a miss.
 - **A rebuild of an existing page (group I).** Diff against both the design and the previous live
-  page, at every breakpoint.
+  page, at every breakpoint; the old live page is a baseline too.
 
-## How to invoke
+## Judging a finding
 
-```
-/qa-audit <page-or-url>
-/qa-audit                      # the page most recently built
-```
-
-Run it in a fresh agent that did not write the page and has no edit rights (the `page-qa` agent).
-
-## Rules
-
-- **Report only. Never edit the build.** A gate that also patches is not a gate.
-- **Measure, never eyeball.** Every finding cites a number and the command that produced it.
-- **Calibrate before trusting a check.** Run it against one case you know is positive first; an
-  uncalibrated probe reports a false defect, not a blank.
-- **Strip zero-width characters before comparing copy.** Design copy can end in U+200B, so a
-  MISSING whose two strings look the same may be only that.
-- **A check that passes proves the check passed, not the claim.** A bounding box is not glyph
-  pixels; populated is not correct.
-- **A control inside an illustrative mockup is a depiction, not a defect.** Its hover is intended.
-- **Park, do not guess.** A question only the user can answer goes to the `open-question` skill.
+- Calibrate before trusting a check: run it on one planted bad case and one known good case first;
+  an uncalibrated probe reports a false defect, not a blank. A check that passes proves the check
+  passed, not the claim: a bounding box is not glyph pixels, and populated is not correct.
+- Strip zero-width characters before comparing copy. Design copy can end in U+200B, so a MISSING
+  whose two strings look the same may be only that.
+- Matching the spec proves nothing about the words. List every readable string (text, title, meta,
+  alt, aria, screen-reader-only) build versus spec, grep the build for other products' names and
+  placeholders, and report each copy error in the spec as a decision for the user.
+- A control inside an illustrative mockup is a depiction, not a defect; its hover is intended.
 
 ## Output cap
 
-**Hard ceiling: 15 defects per run.**
+At most 15 defects per run, blockers first, ranked by what a user sees; over 15, the top 15 and a
+count by category. One line per defect: page, element or `file:line`, the measured value against the
+expected design node or value, and the command that measured it. Zero findings is one sentence.
 
-- Tag every defect BLOCKER or POLISH, blockers first.
-  - **POLISH**: a difference within the tolerances (a gap 2px or less off, a tint under tolerance),
-    on a section whose content, type, colour, contrast, images and behaviour are right.
-  - **BLOCKER**: everything else in scope. Wrong or missing copy, image or section; a state or
-    interaction that is missing or broken; text under its contrast floor; overflow, clipping or a
-    layout break at a width the design specifies; a size or type miss.
-  - When unsure, it is a blocker. Polish never reopens a page after round 1.
-- Rank by user-visible severity. Over 15, report the top 15 plus a count by category.
-- **One line per defect**: page, element (`file:line` when known), measured value vs expected (the
-  design node and value), the command that measured it.
-- Report zero findings as a single sentence. A clean page does not need a paragraph.
+- **POLISH**: a difference within the tolerances (a gap 2px or less off, a tint under tolerance), on
+  a section whose recorded verdict, if any, passes and whose content, type, colour, contrast, images
+  and behaviour are right.
+- **BLOCKER**: everything else in scope. Wrong or missing copy, image or section; a state or
+  interaction that is missing or broken; text under its contrast floor; overflow, clipping or a
+  layout break at a width the design specifies; a size or type miss; anything that fails the
+  section's recorded verdict. When unsure, it is a blocker. Polish never reopens a page after round 1.
 
-## Findings are re-derived, never kept
-
-Do not hand-maintain a list of QA findings. Re-run the measurements each round. A finding that
-outlasts the round goes to the tracker.
-
-When you turn a recipe into a script, the script owns what a defect is: put the thresholds in the
-code, keep it read-only, and bring this file into line when they change.
+Run this skill in a fresh agent that did not write the page and has no edit rights (the `page-qa`
+agent). The builder's self-checks are a separate step; unless the project's check command runs these
+probes, this pass is the only place they run.

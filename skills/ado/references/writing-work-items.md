@@ -57,6 +57,7 @@ replied to the wrong text or acted on it, do not edit it; ask the user how to co
   Description/ReproSteps/AC and let the comment point at it.
 - Keep the numbers that carry the claim ("0px spread", "38px on 3 heroes x 2 viewports") and cut the
   narration around them.
+- No hint of an autonomous run (the `humanize` skill, "Leave out how the text was made").
 
 ## One comment per thread - edit it, do not stack a second one
 

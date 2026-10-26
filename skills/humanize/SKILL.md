@@ -1,6 +1,6 @@
 ---
 name: humanize
-description: "Cut AI tells from prose someone else reads: docs, chat replies to teammates, PR and MR descriptions, commit messages, outbound drafts. Use for '/humanize', 'make this sound human', 'de-AI this', or before sending text to another person. Not for routine chat with the user, skill or agent files, CLAUDE.md or AGENTS.md, memory files, archives or vendored code."
+description: "Cut AI tells from prose someone other than the user reads: docs, chat replies to teammates, PR and MR descriptions, commit messages, outbound drafts. Use for '/humanize', 'make this sound human', 'de-AI this', or before sending text to another person. Not for routine chat with the user, skill or agent files, CLAUDE.md or AGENTS.md, memory files, archives or vendored code."
 ---
 
 # Humanize
@@ -13,6 +13,8 @@ Edit text to remove AI patterns and add human voice.
 2. Rewrite. Preserve meaning, match intended tone.
 3. Add soul (see next section).
 4. Self-audit: "What makes this obviously AI generated?" Fix remaining tells.
+5. After cutting or adding words, re-read the claim around them: a removed clause may have held it
+   together, and an added line may contradict another part.
 
 ## Adding soul
 
@@ -79,34 +81,50 @@ Removing patterns is half the job. Sterile, voiceless writing is just as obvious
 30. **Cut adverbs, or use a stronger verb.** "runs quickly" becomes "is fast" or the number. "significantly improves" becomes the measured delta. An adverb propping up a weak verb means the verb is wrong.
 31. **Prefer the plain word.** "utilize" becomes "use", "leverage" becomes "use", "facilitate" becomes "help", "numerous" becomes "many", "in the event that" becomes "if". The fancier synonym is rarely clearer.
 
----
-
 ## House rules on top of the patterns
 
-These come from the reader, so they win on a conflict with the list above.
+These come from the reader, so they win on a conflict with the list above. Your own writing
+standard, if you keep one, wins over both.
 
 **Match the register of the channel.** A chat reply is not a doc. Teammate chat is lowercase-leaning,
 contractions, short declaratives, one or two bullets at most. A bulleted spec-dump with bold
-field-labels reads as AI even after every pattern above is fixed.
+field-labels reads as AI even after every pattern above is fixed. A chat message that opens a topic
+or asks questions uses sentence case and a greeting; quick replies stay lowercase. No stacked
+sub-bullets, bold labels, "Net:" or API words. Formats for a team spec, lines to say on a call, and a
+talk or deck: `references/formats.md`.
 
 **Match the reader, too.** For design or PM readers, lead with the visible result and a number they
 can see, such as how much shows and at which breakpoint. Leave CSS variables, units and hashes for
-the code comment or the spec.
+the code comment or the spec. For designers on a board, name what is on screen in plain words: no
+internal taxonomy (gate, judges, provenance, ontology) and no code-speak (API paths, enum ids,
+scanner names).
 
 **Never invent a term.** Coined compound nouns are the tell that recurs most: crux, ground truth,
 seeds, tail-tagging, publish contract, faceted model, gating, provenance, BLUF. Use standard product
 vocabulary only: deliverable, owner, status, blocker, dependency, next step. If a real term is
-unavoidable, define it in the same sentence you first use it.
+unavoidable, define it in the same sentence you first use it; if a name is not established, ask
+rather than coining one.
 
-**Write a review comment as a two-line mark.** In a design tool, a tracker or on a board, write
+**Cut these tells too:** sentences over 25 words, "X, not Y" antithesis, false balance, summarizing
+tails and aphorisms, meta self-labels, stats notation (say "ran it four times"), and academic jargon.
+Put the short version up top.
+
+**Write a comment as a two-line mark.** In a design tool, a tracker or on a board, write
 `TAG: <imperative>. <one line of why>.` The tags are SHIP to approve, ADD for a missing piece, FIX
 for something wrong, FLAG for a risk that asks for no action, and Q for an open question.
+
+**Check names and figures at their source.** Before naming a person or their role, or stating a
+figure, a client or a past result in team material, check it where your project records it. Anything
+you cannot confirm there goes to the user, not into the text.
 
 **Leave out how the text was made.** Team-facing text, commit bodies included, never mentions
 Claude, the assistant, a subagent, an autonomous run, `/loop` or a local config path. Keep the
 `Co-Authored-By` trailer that Claude Code adds, and check the body, not the trailer. Don't cite
 meetings either. No call quotes, no "the meeting decided", no meeting-date stamps. State the
-decision as the team's shared understanding.
+decision as the team's shared understanding. Never mention a personal meeting-capture tool, its
+transcripts or notes drawn from them; ask the user about them in chat. Before a write to a tracker
+or a design tool, save the text as a `.md` draft and run
+`python "${CLAUDE_PLUGIN_ROOT}/tools/doclint.py" <draft.md>` on it: no hook covers those writes.
 
 **Lead with the point.** Each paragraph opens with its claim, and each header states that claim on
 its own. Cover the body, and the header should still tell the reader what to do. Say what a thing is
@@ -119,35 +137,7 @@ options doc, find the standard template and use its section names verbatim. Put 
 first, as an open question, and mark a section you cannot back with evidence "proposed, not agreed".
 For each decision, write the call, what the named thing is, why as a mechanism, the options
 considered, the cost and what is still unproven. Use a scored matrix only when every cell is
-measured.
+measured. If a draft is rejected twice, stop restyling and ask what kind of document the reader
+expects.
 
-## Where this does NOT apply
-
-Do not run this on files whose reader is a machine or whose job is to be a record:
-
-- Skill and agent files and any `CLAUDE.md` or `AGENTS.md`. These are model instructions. Their
-  bold labels, terse fragments and structure are load-bearing.
-- Archive folders. An archive is a record of what was written. Rewriting it destroys the thing it
-  exists for.
-- Cloned or vendored source. Changes there go through their own review.
-- Memory files under `~/.claude/projects/*/memory/`. Notes to self, optimised for precision and
-  recall.
-- Generated output: `dist/`, `node_modules/`, lockfiles.
-
----
-
-## How to invoke
-
-```
-/humanize <text>
-/humanize                      # the draft just produced
-```
-
-## Rules
-
-- **Your own writing standard, if you keep one, outranks this skill** on any conflict.
-- **Match the register of the channel.** A chat reply is not a memo.
-- **Never invent a term.** If a name is not established, ask rather than coining one.
-- **Attribute to a role or a decision, never to a named individual**, in anything a teammate reads.
-- **Short version up top.** Kill hedge-triads and em-dash overload.
-- **Park, do not guess**: a question only the user can answer goes to the `open-question` skill.
+Generated output is never prose to edit: `dist/`, `node_modules/`, lockfiles.

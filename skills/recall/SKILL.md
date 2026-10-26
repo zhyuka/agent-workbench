@@ -45,10 +45,5 @@ never share a record print as SPLIT, so search each alone.
 - `--before` cannot cut notes or memory: a file has no history, so each is searched as it is today.
 - Not covered: Downloads, mail, chat apps, browser history, anything outside the configured
   folders. If the answer could live there, say so instead of "never discussed".
-
-## Rules
-
-- Cite a hit by its link: the design-tool permalink with its comment id, the work-item URL, or the
-  session id and time.
-- Never print a credential from a hit, and never extract a log to read around a redaction.
-- After changing recall.py, run `--selftest` and quote it.
+- Never extract a log to read around a redaction. After changing recall.py, run `--selftest` and
+  quote it.

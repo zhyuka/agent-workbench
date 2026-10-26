@@ -24,13 +24,24 @@ Checks (a FAIL exits 1; a WARN or a report line does not):
                    ratchet (config key skill_lint.startup_max, default 6200). Set it at your current
                    total and only ever lower it: a fixed budget is what stops rules from only ever
                    being added.
-  7. NEW SKILLS  - with --only: FAIL when the commit adds a skills/<name>/SKILL.md and no eval suite
+  7. REFERENCES  - with --only: FAIL when a line a staged .md adds cites a file or a `file.md` §N that
+                   doesn't exist (workspace_audit.py's cites and xrefs), or a staged .py won't
+                   compile or has no --help (its tools check). Files resolve against the config key
+                   workspace.root, else the project folder.
+  8. NEW SKILLS  - with --only: FAIL when the commit adds a skills/<name>/SKILL.md and no eval suite
                    has a passing receipt for that folder's sha (agent_gate_stale.py's suites folder,
-                   config key agent_gate.suites; not run when that is unset).
+                   config key agent_gate.suites; not run when that is unset). agent_gate_stale.py
+                   lists the rest.
+  9. TAGS        - with --only: FAIL when a staged skill, agent or CLAUDE.md file adds a line with a
+                   dated attribution ("(the user, 2026-10-17)", "user 10/24:"), a star mark (U+2605),
+                   or capitals used for emphasis (NEVER, ALWAYS, MUST, MANDATORY, CRITICAL,
+                   IMPORTANT). Fenced and inline code don't count; lines already there pass until
+                   someone edits them.
 
 Usage:  python tools/skill_lint.py [skills_dir]      exit 1 on any FAIL (default ~/.claude/skills)
-        python tools/skill_lint.py --selftest        planted skills: the startup total counts a
-                                                     project skill and skips one set name-only
+        python tools/skill_lint.py --selftest        planted skills and lines: the startup total
+                                                     counts a project skill and skips one set
+                                                     name-only; topic ownership; the tags
 
 What loads at startup is read from: ~/.claude/agents (SKILL_LINT_AGENTS), the current project's
 .claude/skills (SKILL_LINT_PROJECT_SKILLS) less any skill its .claude/settings*.json skillOverrides set
@@ -209,11 +220,46 @@ def _restates(body, rx, owner):
     return any(re.search(rx, s, re.I) and not any(c in s for c in cites) for s in secs)
 
 
+def staged_references(staged):
+    """7. REFERENCES, commit mode only: workspace_audit.py's cites and xrefs checks, run on the staged
+    .md files alone, and its tools check on the staged .py files. The daily run reads the whole
+    working set but reports later; here a file can't be committed with a path, a tool or a section
+    that isn't there. A reference fails only when it is in a line this commit adds: a doc may name a
+    retired file on purpose, and judging the whole file would refuse every edit to it. Each check's
+    own blind spots hold: cites matches by file name, not full path."""
+    md = [os.path.abspath(p) for p in staged if p.endswith(".md")]
+    py = [os.path.abspath(p) for p in staged if p.endswith(".py")]
+    print("\n7. REFERENCES (staged .md files: cited files and § sections exist;"
+          " staged .py files: compile, and a runnable one answers --help)")
+    if not md and not py:
+        print("   (no staged .md or .py file)")
+        return []
+    import workspace_audit as wa
+    wa.configure(_config("workspace", "root") or PROJECT)
+    wa.ONLY = set(md + py)
+    out = []
+    added = "\n".join(added_lines(p) for p in md)
+    checks = ((wa.check_cites, wa.check_xrefs) if md else ()) + ((wa.check_tools,) if py else ())
+    for check in checks:
+        r = check(False)
+        if not r.total:
+            # 0 of 0 is not a pass: nothing in the staged files was there to check.
+            print(f"   NOT RUN  {r.name:<9} 0 of 0, nothing to check")
+            continue
+        new = [m for m in r.misses if check is wa.check_tools or (miss_key(m) or "\0") in added
+               or miss_key(m) is None]
+        old = len(r.misses) - len(new)
+        print(f"   {'FAIL' if new else 'PASS'}  {r.name:<9} {r.ok} of {r.total}"
+              + (f"; {old} in lines this commit does not touch, not judged" if old else ""))
+        out += [f"refs {r.name}: {m}" for m in new]
+    return out
+
+
 SUITES = os.environ.get("SKILL_LINT_SUITES") or os.path.expanduser(_config("agent_gate", "suites", default="") or "")
 
 
 def new_skill_gate(staged):
-    """7. NEW SKILLS, commit mode: a SKILL.md this commit adds is refused unless a suite in SUITES
+    """8. NEW SKILLS, commit mode: a SKILL.md this commit adds is refused unless a suite in SUITES
     names its folder and holds a passing receipt for the folder's current sha (agent_gate_stale.py's
     hash). An existing skill is listed STALE or UNTESTED by agent_gate_stale.py instead, and is not
     refused here."""
@@ -228,7 +274,7 @@ def new_skill_gate(staged):
             new.append(os.path.dirname(p))
     if not new:
         return []
-    print("\n7. NEW SKILLS (a skill this commit adds needs a suite with a passing receipt)")
+    print("\n8. NEW SKILLS (a skill this commit adds needs a suite with a passing receipt)")
     if not SUITES:
         print("   NOT RUN  no suites folder: set the config key agent_gate.suites to gate new skills")
         return []
@@ -253,6 +299,70 @@ def new_skill_gate(staged):
             out.append(f"new skill {name}: no suite in {SUITES} names its folder with a passing receipt for "
                        f"sha {sha}. Build a suite for it, run it, then commit")
     return out
+
+
+def added_lines(path):
+    """The text a commit adds to `path` (`git diff --cached` in its repo), or the whole file when
+    nothing is staged for it: a new file outside git, or a run by hand."""
+    r = subprocess.run(["git", "-C", os.path.dirname(path), "diff", "--cached", "-U0", "--", path],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not r.stdout.strip():
+        return open(path, encoding="utf-8", errors="replace").read()
+    return "\n".join(l[1:] for l in r.stdout.splitlines() if l.startswith("+") and not l.startswith("+++"))
+
+
+# 9. TAGS. A dated attribution is who said it and when: "(<who>, <date>)" with anything before the
+# who inside the brackets, or "<who> <date>:" opening a quote. <who> is any one word, a name or a
+# role, so the pattern needs no list of names.
+_DATE = r"(?:20\d\d-\d\d-\d\d|\d{1,2}/\d{1,2}(?:/\d{2,4})?)"
+_WHO = r"[A-Za-z][\w'.-]*"
+TAGS = [
+    ("a dated attribution", re.compile(r"\([^()]{0,60}?\b" + _WHO + r",\s*" + _DATE + r"\b[^()]{0,40}\)"
+                                       + r"|\b" + _WHO + r",? " + _DATE + r"\s*:")),
+    ("a star", re.compile("★")),
+    ("capitals for emphasis", re.compile(r"\b(?:NEVER|ALWAYS|MUST|MANDATORY|CRITICAL|IMPORTANT)\b")),
+]
+
+
+def tag_lines(text):
+    """[(tag, line)] for the lines of `text` that carry a TAGS mark outside fenced and inline code."""
+    out, fence = [], False
+    for ln in text.split("\n"):
+        if ln.lstrip().startswith("```"):
+            fence = not fence
+            continue
+        prose = "" if fence else re.sub(r"`[^`]*`", "", ln)
+        out += [(name, ln.strip()) for name, rx in TAGS if rx.search(prose)]
+    return out
+
+
+def instruction_file(path):
+    """A skill or agent file (any .md under a skills or agents folder) or a CLAUDE.md."""
+    parts = path.replace(os.sep, "/").split("/")
+    return path.endswith(".md") and ("skills" in parts or "agents" in parts or parts[-1] == "CLAUDE.md")
+
+
+def added_tags(staged):
+    """9. TAGS, commit mode: a staged instruction file may not add a line with a dated attribution, a
+    star or capitals for emphasis (templates/writing-instructions.md, 'What an instruction looks
+    like')."""
+    out = []
+    for p in staged:
+        q = os.path.abspath(p)
+        if instruction_file(q) and os.path.exists(q):
+            out += [f"{p}: adds {tag}: \"{line[:90]}\". Say the rule plainly; the date and who said it go "
+                    f"in the record" for tag, line in tag_lines(added_lines(q))]
+    return out
+
+
+def miss_key(miss):
+    """The text a reference miss quotes from its line: a cite's backticked token or an xref's §N.
+    None when it can't be told, and then the miss is kept."""
+    k = re.findall(r"`([^`]+)`", miss)
+    if k:
+        return k[-1]
+    k = re.search(r" cites \S+ (§\S+);", miss)
+    return k.group(1) if k else None
 
 
 def shared_docs():
@@ -416,7 +526,9 @@ def main():
         fails = [f for f in fails if f not in others]
         for f in others:
             warns.append(f"(not staged) {f}")
+        fails += staged_references(ONLY)
         fails += new_skill_gate(ONLY)
+        fails += added_tags(ONLY)
 
     print("\n" + "=" * 70)
     for f in fails:
@@ -432,7 +544,8 @@ def selftest():
     """Run this file on planted folders and read its output. A user skill (5 words), a project skill (7)
     and a project skill set name-only (9): the startup total must be 12. Reading the user folder alone
     gives 5; ignoring the override gives 21. A registered topic restated in a second skill must FAIL,
-    and the same text in a section that cites the owner must not."""
+    and the same text in a section that cites the owner must not. Check 9 must catch each planted bad
+    line, pass each good one, and read only the added line of a staged edit."""
     import json, tempfile
     ok_all = True
     with tempfile.TemporaryDirectory() as tmp:
@@ -476,6 +589,36 @@ def selftest():
         ok_all &= ok
         print(("PASS" if ok else "FAIL") + " a registered topic restated without citing its owner fails; one that "
               "cites the owner does not")
+
+        # Check 9: each bad line caught, each good one passed, and only the added line of a staged
+        # edit read.
+        bad = ["- **Design changes (the user, 2026-10-17):** a frame change is a thread.", "- ★ Read it first.",
+               "Priority runs highest first (per the lead, 10/14).", "Drafts wait (no timed card; the user, 2026-10-25).",
+               "You MUST search before a create.", 'user 10/24: "can you do this now"']
+        good = ["Run `ping.py --since 2026-10-07T23:25`.", "A run that did not start is DID NOT RUN.",
+                "See `_archive/open-threads-2026-10-20/`.", "Each finding is a BLOCKER or POLISH.",
+                "Crop to the top half of the frame (about 1/2 of its height).", "```\nNEVER inside a fence\n```"]
+        caught = [b for b in bad if tag_lines(b)]
+        passed = [g for g in good if not tag_lines(g)]
+        repo = os.path.join(tmp, "repo")
+        f = os.path.join(repo, ".claude", "skills", "x", "SKILL.md")
+        os.makedirs(os.path.dirname(f))
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write("You MUST read it (the user, 2026-10-01).\n")
+        # The planted repo ignores your own git hooks and signing, so the self-test commit can't block.
+        g = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@localhost",
+             "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={os.devnull}"]
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(g + ["add", "-A"], check=True)
+        subprocess.run(g + ["commit", "-qm", "old line"], check=True)
+        with open(f, "a", encoding="utf-8") as fh:
+            fh.write("A new ★ line.\n")
+        subprocess.run(g + ["add", "-A"], check=True)
+        staged = added_tags([f])
+        ok = len(caught) == len(bad) and len(passed) == len(good) and len(staged) == 1 and "a star" in staged[0]
+        ok_all &= ok
+        print(("PASS" if ok else "FAIL") + f" tags: {len(caught)} of {len(bad)} bad lines caught, {len(passed)} of "
+              f"{len(good)} good lines passed, staged edit gives {len(staged)} finding(s), want 1 (the added star)")
     return 0 if ok_all else 1
 
 
