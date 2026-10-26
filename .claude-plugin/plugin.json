@@ -1,0 +1,24 @@
+{
+  "name": "agent-workbench",
+  "displayName": "Agent Workbench",
+  "version": "0.1.0",
+  "description": "A working setup for Claude Code: skills, agents and Python tools for checking your own work, reviewing with fresh eyes, searching what you've already decided, and keeping Figma and Azure DevOps writes safe.",
+  "author": {
+    "name": "Derek Zhou",
+    "url": "https://github.com/zhyuka"
+  },
+  "homepage": "https://github.com/zhyuka/agent-workbench",
+  "repository": "https://github.com/zhyuka/agent-workbench",
+  "license": "MIT",
+  "keywords": [
+    "skills",
+    "agents",
+    "subagents",
+    "workflow",
+    "review",
+    "figma",
+    "azure-devops",
+    "memory",
+    "session-logs"
+  ]
+}

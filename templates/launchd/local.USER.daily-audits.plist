@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs the log backup, then the daily audits (upkeep cleanup first, today.md last), at login and
+  every day at 08:00. macOS only.
+
+  To use it:
+    1. Replace every placeholder:
+         USER      a short label prefix of your own (the file name too), e.g. local.jdoe.daily-audits
+         PYTHON    the python that runs the tools, e.g. /usr/bin/python3 or a venv's bin/python
+         TOOLS     the plugin's tools folder, absolute
+         HOME      your home folder, absolute (launchd does not expand ~)
+    2. Copy it to ~/Library/LaunchAgents/ and load it:
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.USER.daily-audits.plist
+    3. Set scheduled_audits.agent_prefix to "local.USER." in ~/.claude/agent-workbench.json so the
+       watchdog notices when this job stops being loaded.
+  To pause it on purpose: launchctl disable gui/$(id -u)/local.USER.daily-audits (the watchdog
+  skips a disabled job; unloading alone is undone at the next login).
+  The job needs Full Disk Access (or Files and Folders access) to read a workspace under ~/Desktop
+  or ~/Documents; without it the tools see an unreadable folder and report did-not-run.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.USER.daily-audits</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>PYTHON TOOLS/backup_cc_logs.py; PYTHON TOOLS/ledger.py; PYTHON TOOLS/scheduled_audits.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>TOOLS</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>8</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>HOME/Library/Logs/DailyAudits.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>HOME/Library/Logs/DailyAudits.err.log</string>
+</dict>
+</plist>

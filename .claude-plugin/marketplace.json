@@ -1,0 +1,17 @@
+{
+  "name": "agent-workbench",
+  "owner": {
+    "name": "Derek Zhou",
+    "url": "https://github.com/zhyuka"
+  },
+  "plugins": [
+    {
+      "name": "agent-workbench",
+      "source": "./",
+      "description": "A working setup for Claude Code: skills, agents and Python tools for checking your own work, reviewing with fresh eyes, searching what you've already decided, and keeping Figma and Azure DevOps writes safe.",
+      "version": "0.1.0"
+    }
+  ],
+  "description": "Skills, agents and Python tools for Claude Code: fresh-eyes review, a search over everything you've already decided, open-question triage, and guarded Figma and Azure DevOps writes.",
+  "metadata": {}
+}
