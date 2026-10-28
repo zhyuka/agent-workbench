@@ -33,7 +33,7 @@ Tokens never go in these files. `FIGMA_TOKEN`, `ADO_PAT` and the like come from 
 | `tool_time.tools` | tool_time | extra folders of tools to time |
 | `agent_gate.suites` | agent_gate_stale | folder of eval suites |
 | `metrics.*` (`log_roots`, `project_folders`, `skip_folders`, `repo`, `branch`, `ticket_re`, `check_dir`, `tsv`) | weekly_metrics | inputs of the weekly process measures |
-| `doclint.*` (`scope`, `names`, `names_file`, `people_glob`, `people_prefix`, `exempt_names`, `exempt_parts`) | doclint | which docs it reads and the people's names it refuses |
+| `doclint.*` (`scope`, `names`, `names_file`, `people_glob`, `people_prefix`, `people_file`, `exempt_names`, `exempt_parts`) | doclint | which docs it reads and the people's names it refuses |
 | `ledger.*` (`dir`, `rulings`, `rulings_also`, `ado_cache`, `skip_cwd`, `skip_first`, ...) | ledger, digest | where the request ledger lives and what else it reads |
 | `transcripts.*` (`dir`, `aliases`, `aliases_file`, `ambiguous`) | transcript_check | the transcripts folder and the spellings of your product names |
 | `workspace.*` (`root`, `not_ours`, `docs`, `map`, `skip`, ...) | workspace_audit, archive, upkeep, desktop_mirror | your working folder and what in it the audits judge |

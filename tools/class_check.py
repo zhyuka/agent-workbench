@@ -11,8 +11,8 @@ to check - it is never being able to state a numerator without also stating a de
 This tool will not print one without the other, and it exits nonzero when the class is not
 uniform, so a build step or a skill can gate on it.
 
-Deliberately stateless. Gates that refuse at a decision point and keep no bookkeeping get used;
-gates that need a file maintained between runs get abandoned.
+Stateless on purpose. A gate that refuses at a decision point and keeps no bookkeeping stays in
+use; one that needs a file kept up between runs gets abandoned.
 
 Usage
   class_check.py <pattern> [--glob G] [--exclude G] [--root R] [--expect all|none|N] [--fixed] [-i] [-v]
@@ -27,7 +27,7 @@ Examples
   # what is the blast radius of this component, before touching it
   class_check.py 'HeroBanner' --glob '**/*.astro'
 
-  # check the BUILD OUTPUT, not the source - the denominator that actually ships
+  # check the build output, not the source - the denominator that actually ships
   class_check.py 'aria-label' --root dist --glob '**/*.html' --expect all
 
 Skipped directories
@@ -39,7 +39,7 @@ Skipped directories
 
 Exit codes
   0  the class is uniform in the way --expect demanded (or no --expect was given)
-  1  the class is NOT uniform - misses are listed
+  1  the class is not uniform - misses are listed
   2  could not run: the class is empty (the glob matched nothing, so any claim about it is
      vacuous), --root is not a directory, the pattern is not a valid regex, or --expect is not
      all, none or an integer

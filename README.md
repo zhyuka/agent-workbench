@@ -47,6 +47,15 @@ All of them are in [`tools/`](tools). By area:
 
 The tools that grade something share one exit-code rule: 0 clean, 1 findings, 2 could not run. A tool that couldn't run never reports clean.
 
+### Calling a tool from outside the plugin
+
+While the plugin is enabled, Claude Code puts its [`bin/`](bin) folder on the Bash PATH. So a skill or script in your own project can run any tool without knowing where the plugin is installed:
+
+    agent-workbench class_check 'SiteFooter' --glob '**/*.astro' --expect all
+    agent-workbench --list
+
+`agent-workbench <tool> [args...]` runs `tools/<tool>.py` with `python3`, or `python` if there's no `python3`, and exits with the tool's own code. An unknown tool exits 2 with a one-line message. Inside the plugin's own skills, `python "${CLAUDE_PLUGIN_ROOT}/tools/<tool>.py"` still works.
+
 ## Settings
 
 Project values, such as an Azure DevOps project or a Figma file key, go in `.claude/agent-workbench.json`, never in a tool. Tokens come from environment variables or the OS keychain. Every key is listed in [docs/config.md](docs/config.md). A tool that needs a key you haven't set stops and names it.

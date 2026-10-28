@@ -1,0 +1,58 @@
+#!/bin/sh
+# agent-workbench - run an Agent Workbench tool from anywhere.
+#
+#   agent-workbench <tool> [args...]   run <plugin root>/tools/<tool>.py with the args
+#   agent-workbench --list             print the tool names, one per line
+#
+# Claude Code puts an enabled plugin's bin/ on the Bash PATH, so a project's own skills can call
+# `agent-workbench class_check ...` without knowing where the plugin is installed. The plugin root is
+# found from this script's own location, following symlinks. Python is python3, else python.
+# Exit 2 with one line on stderr: no tool named, an unknown tool, or no Python found. Otherwise the
+# tool's own exit code.
+
+me=$0
+while [ -L "$me" ]; do
+    link=$(readlink "$me")
+    case $link in
+        /*) me=$link ;;
+        *) me=$(dirname "$me")/$link ;;
+    esac
+done
+root=$(cd "$(dirname "$me")/.." && pwd -P) || exit 2
+tools=$root/tools
+
+if [ "$#" -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo "usage: agent-workbench <tool> [args...] | agent-workbench --list   (tools in $tools)"
+    [ "$#" -eq 0 ] && exit 2
+    exit 0
+fi
+
+if [ "$1" = "--list" ]; then
+    for f in "$tools"/*.py; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f" .py)
+        case $name in _*) continue ;; esac
+        echo "$name"
+    done
+    exit 0
+fi
+
+tool=${1%.py}
+shift
+case $tool in
+    ""|*/*|_*) echo "agent-workbench: unknown tool '$tool'; run agent-workbench --list" >&2; exit 2 ;;
+esac
+if [ ! -f "$tools/$tool.py" ]; then
+    echo "agent-workbench: unknown tool '$tool'; run agent-workbench --list" >&2
+    exit 2
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+    py=python3
+elif command -v python >/dev/null 2>&1; then
+    py=python
+else
+    echo "agent-workbench: no python3 or python on PATH" >&2
+    exit 2
+fi
+exec "$py" "$tools/$tool.py" "$@"

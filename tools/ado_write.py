@@ -1,31 +1,33 @@
 #!/usr/bin/env python
-"""ado_write.py - the WRITE half of ado_rest.py.
+"""ado_write.py - the write half of ado_rest.py.
 
 WHY THIS EXISTS. ado.py is the canonical create/lint gate. Where `az` sits behind a permission
 prompt, every az call blocks on a click nobody can make from a background run. ado_rest.py reads
 over the PAT and python urllib, but it is read-only: pull / audit / show / decisions.
 
-So this file is deliberately NARROW. It does the writes that a board reconcile needs and
+This file is narrow on purpose. It does the writes that a board reconcile needs and
 nothing else, over the same PAT + urllib path:
 
     state    <id> <State>              System.State
     field    <id> <ref> <value>        any single field, e.g. Microsoft.VSTS.Common.AcceptanceCriteria;
                                        "" clears it
-    comment  <id> <text> [--stack WHY] add a comment. REFUSES if the newest comment on the
+    comment  <id> <text> [--stack WHY] add a comment. Refuses if the newest comment on the
                                        item is already yours - nobody has replied, so patch
                                        that one with `editcmt` instead of stacking a second.
-                                       Allowed once a teammate has replied. Warns over 700 chars.
-    parent   <id> <parentId>           attach an orphan to its parent (a RELATION, not a field -
-                                       `field System.Parent` does NOT work). Refuses if already set.
+                                       Allowed once a teammate has replied. A time gap, a closed
+                                       item or a fix found later is no reason to --stack: merge
+                                       it in, with no dated "Update" block. Warns over 700 chars.
+    parent   <id> <parentId>           attach an orphan to its parent (a relation, not a field -
+                                       `field System.Parent` does not work). Refuses if already set.
     reparent <id> <newParentId> [--keep-related]
-                                       MOVE an item to a different parent (remove + add in one
+                                       Move an item to a different parent (remove + add in one
                                        rev-guarded patch). Refuses if there is no parent, or >1.
                                        --keep-related links the old parent as Related in the same
                                        patch. Both refuse a parent in the child's own backlog
                                        category (a Bug under a Task), before any write.
-    editcmt  <id> <commentId> <text>   REPLACE a comment (this is how a prose pile gets fixed;
+    editcmt  <id> <commentId> <text>   Replace a comment (this is how a prose pile gets fixed;
                                        ADO has no delete-and-repost that keeps the thread)
-    delcmt   <id> <commentId>          soft-delete a comment, ONLY to collapse a same-author pile
+    delcmt   <id> <commentId>          soft-delete a comment, only to collapse a same-author pile
                                        whose content has already been merged upward
     comments <id>                      list the item's comments with their ids (read-only), for
                                        editcmt/delcmt
@@ -65,7 +67,7 @@ covers an unset org or project, where nothing was sent. A write that times out e
 landed. Not compared: markup that changes no text, link or mention, such as a lost <b>, <s> or
 alt text, and text moved across list items. Only the first page of comments, up to 200, is read.
 
-It does NOT create work items. Creation stays behind ado.py's search-first gate, which is the
+It does not create work items. Creation stays behind ado.py's search-first gate, which is the
 whole reason that gate exists - a create is where duplicates happen, and this file has no
 dup-search in it. For a new item run `ado.py --rest new`, which keeps the search-first gate and
 skips `az`.
@@ -378,6 +380,8 @@ def add_comment(wid, text, stack_reason=None):
                     f"living spec -\n"
                     f"  rewrite the BODY and let the comment point at it:\n"
                     f'    python ado_write.py field {wid} System.Description "<clean current truth>"\n\n'
+                    f"  A time gap, a closed item or a fix found later is no reason to stack. Merge it so\n"
+                    f"  the comment reads as the resolution as it stands, with no dated \"Update\" block.\n\n"
                     f"  Genuinely need a second comment? "
                     f'python ado_write.py comment {wid} "<text>" --stack "<why>"')
     else:

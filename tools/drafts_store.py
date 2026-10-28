@@ -25,6 +25,11 @@ A draft reworded at post time beyond the match (0.95 for a NEW draft on the same
 EDIT draft of the same comment) stays, and the post names the drafts it kept on that target so the
 session deletes the right one by hand.
 
+A quote's lines are wrapped for the file, and Figma keeps every line break, so a quote copied as
+a comment's text posts with a break every line. figma_post.py new and reply refuse such text
+(wrapped_refusal()); text_of() joins a quote back into one line per paragraph, keeping list items,
+blank lines and lines that end in a link or a colon.
+
 BLIND TO a draft posted on a node other than the one its heading names, and to Cut rows that name
 no node id (a topic only).
 """
@@ -67,7 +72,10 @@ def blocks(text):
         j = next((k for k in range(i + 1, len(lines)) if lines[k].startswith(("### ", "## "))), len(lines))
         body = lines[i:j]
         head = body[0]
-        quote = "\n".join(ln[2:] for ln in body if ln.startswith("> "))
+        # A bare ">" is a blank line inside the quote, the break between two paragraphs. Skipped, it
+        # would run every paragraph of a quote into one line in text_of().
+        quote = "\n".join(ln[2:] if ln.startswith("> ") else "" for ln in body
+                          if ln.startswith("> ") or ln.rstrip() == ">")
         cid = re.search(r"EDIT your own comment \[(\d{9,})\]", head)
         node = re.search(r"NEW on [^`]*`([\d:;I]+)`", head)
         out.append({"first": i, "end": j, "head": head[4:], "quote": quote,
@@ -124,6 +132,50 @@ def remove_posted(posted, comment_id=None, node_id=None, path=None):
     b = hits[0]
     _write(path, "\n".join(lines[: b["first"]] + lines[b["end"]:]))
     return f"  drafts.md: removed the posted draft \"{b['head'][:80]}\""
+
+
+# A line that starts a list item: an intended break. Any other break inside a paragraph is the file's
+# wrapping, unless the line before ends with a URL or a colon.
+LIST_ITEM = re.compile(r"[ \t]*(?:\d+[.)]|[*•\-])[ \t]")
+
+
+def wrapped_lines(text):
+    """The line breaks inside a paragraph that look like a quote's wrapping, as (end of line, start of
+    next) pairs. Text copied from a wrapped quote in the drafts file posts with a break every line."""
+    out = []
+    for para in re.split(r"\n[ \t]*\n", text or ""):
+        lines = para.split("\n")
+        for a, b in zip(lines, lines[1:]):
+            if LIST_ITEM.match(b) or re.search(r"https?://\S+$", a.rstrip()) or a.rstrip().endswith(":"):
+                continue
+            out.append((a.rstrip()[-30:], b.strip()[:30]))
+    return out
+
+
+def wrapped_refusal(text):
+    """Refusal text or None, for a post or an edit."""
+    w = wrapped_lines(text)
+    if not w:
+        return None
+    return (f"REFUSED: the text breaks {len(w)} line(s) mid-paragraph, as a wrapped quote in the drafts file does, "
+            f"for one: \"...{w[0][0]}\" / \"{w[0][1]}...\". Figma keeps each break. Build the text with "
+            "drafts_store.text_of(), or join the lines; an intended break is a list item or a blank line.")
+
+
+def text_of(quote):
+    """A draft's quote as the comment's text: the file's wrapping joined back into one line per paragraph,
+    list items and blank lines kept."""
+    paras = []
+    for para in re.split(r"\n[ \t]*\n", (quote or "").strip()):
+        lines, out = para.split("\n"), []
+        for ln in lines:
+            if out and not LIST_ITEM.match(ln) and not re.search(r"https?://\S+$", out[-1].rstrip()) \
+                    and not out[-1].rstrip().endswith(":"):
+                out[-1] = out[-1].rstrip() + " " + ln.strip()
+            else:
+                out.append(ln.rstrip())
+        paras.append("\n".join(out))
+    return "\n\n".join(paras)
 
 
 def cut_rows(text):
@@ -232,6 +284,20 @@ def selftest():
     case("a node not in it passes", cut_refusal("7106:5855", path=p) is None and cut_refusal("9669:36462", path=p) is None)
     case("a missing file refuses nothing and removes nothing",
          cut_refusal("7106:58553", path=p + "x") is None and remove_posted(posted, path=p + "x") is None)
+    wrapped = ("FIX (done in Figma): These cards are 450 tall now, on desktop and phone, so the row fits its\n"
+               "seven pills with the last one back in place.\n\nBefore and after:")
+    listed = ("FIX (done in Figma): Two fixes.\n\n1. The title reads \"A\". It read \"B\".\n"
+              "2. The badge reads \"C\".\n\nFirst: https://www.figma.com/design/K/File?node-id=1-2\n"
+              "Second: https://www.figma.com/design/K/File?node-id=3-4\n\nBefore and after:")
+    case("a quote's wrapping, copied as a comment's text, is refused", wrapped_refusal(wrapped) is not None)
+    case("list items and lines that end in a link or a colon are kept", wrapped_refusal(listed) is None)
+    case("text_of joins the wrapping back into one line", wrapped_refusal(text_of(wrapped)) is None
+         and "fits its seven pills" in text_of(wrapped))
+    case("text_of keeps list items and link lines as they are", text_of(listed) == listed)
+    md = "### Two fixes — EDIT your own comment [1111111111](https://x#1111111111)\n\n" + "\n".join(
+        ("> " + ln) if ln else ">" for ln in listed.split("\n")) + "\n"
+    case("a quote's blank '>' lines come through blocks() and text_of() as paragraph breaks",
+         text_of(blocks(md)[0]["quote"]) == listed)
     os.remove(p)
     os.rmdir(td)
     print(f"{sum(results)} of {len(results)} planted cases behave as expected.")

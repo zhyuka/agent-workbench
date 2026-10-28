@@ -23,6 +23,9 @@ THE NAME LIST is yours, never built in. It is the union of:
   - doclint.people_glob: a glob of files named <prefix><first>_<last>.md (e.g. memory cards
     "people_jane_doe.md"); tokens of 4+ characters become names. doclint.people_prefix sets the
     prefix (default "people_").
+  - doclint.people_file: a markdown people directory whose entries start "- **First Last**"; each
+    capitalised token of 4+ characters in the bold name becomes a name, so the list follows the
+    directory instead of rotting in a config file.
 With no list configured the name check runs on an empty list and every summary says so: a name not
 on the list passes. Names shorter than 4 characters are never derived; list them explicitly.
 
@@ -121,10 +124,28 @@ def _read_names(path):
     return out
 
 
-def derived_names():
-    """First/last name tokens from files matching doclint.people_glob, so the list follows your
-    notes instead of rotting in a config file. Length >= 4 only."""
+def people_file_names(path):
+    """Name tokens from each entry's bold name ("- **First Last**") in a markdown people directory.
+    Capitalised, length >= 4 only. A missing file gives none."""
     out = set()
+    path = os.path.expanduser(path)
+    if not os.path.exists(path):
+        return out
+    for line in open(path, encoding="utf-8"):
+        m = re.match(r"- \*\*([^*]+)\*\*", line)
+        for tok in re.findall(r"[A-Za-z]+", m.group(1)) if m else []:
+            if len(tok) >= 4 and tok.lower() not in STOPWORDS and tok[0].isupper():
+                out.add(tok)
+    return out
+
+
+def derived_names():
+    """First/last name tokens from files matching doclint.people_glob, and from the entries of
+    doclint.people_file, so the list follows your notes instead of rotting in a config file.
+    Length >= 4 only."""
+    out = set()
+    if _cfg("people_file"):
+        out |= people_file_names(_cfg("people_file"))
     pattern = _cfg("people_glob")
     if not pattern:
         return out
@@ -457,6 +478,12 @@ def selftest() -> int:
         check("an address inside backticks is still an address",
               [k for k, *_ in lint("Write to `x.y@example.com`.\n")] == ["email"])
         check("--names drives the list (2 entries from the file)", len(name_list()) == 2)
+        pf = os.path.join(d, "people.md")
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write("# People\n\n- **Robin Okafor-Hale**: the design lead\n- **Al Ng**: too short\n"
+                    "Robin Free is not an entry.\n")
+        check("a people directory gives each entry's bold-name tokens of 4+ letters, nothing else",
+              people_file_names(pf) == {"Robin", "Okafor", "Hale"})
         check("only= keeps findings on added lines; the same name on an added line is not hidden",
               [f[1] for f in lint("Jane one.\nJane two.\n", {2})] == [2])
         diff = "+++ b/a.md\n@@ -3,0 +4,2 @@\n+x\n+y\n+++ b/b.md\n@@ -1 +1 @@\n"

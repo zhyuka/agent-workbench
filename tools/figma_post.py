@@ -6,12 +6,13 @@ you run BEFORE writing. This is the write, kept in a separate file so the gate c
 accident - you have to reach for a different command.
 
     reply   <file_key> <comment_id> <text> [--own-last-ok] [--multi-ok] [--repost-ok]
-            [--edited <id>,<id>... --picture <file.jpg>]
+            [--edited <id>,<id>... --picture <file.jpg> --separate <id>,<id>... --cause <slug>]
                                               reply INTO an existing thread
     new     <file_key> <node_id> <text> [--separate <id>,<id>...] [--pin-ok] [--multi-ok] [--repost-ok]
-            [--edited <id>,<id>... --picture <file.jpg>]
+            [--edited <id>,<id>... --picture <file.jpg> --cause <slug> [--new-cause]]
                                               start a thread pinned to a node
-    fixnote <file_key> <comment_id> <text> --edited <id>,<id>...
+    cause   <file_key> [<thread_id> <slug>]   tag an open FIX thread with its kind of fix; alone, list them
+    fixnote <file_key> <comment_id> <text> --edited <id>,<id>... [--cause <slug>] [--separate <id>,<id>...]
                                               check a FIX comment edited with figma_attach.py edit, then stamp it
     delete  <file_key> <comment_id>           remove a comment you posted that has no replies
     batch   <items.json> [--check]            post a pass's approved items as one batch; see THE BATCH
@@ -69,7 +70,11 @@ the nodes the fix changed. When one of them sits inside a component or component
 has to sit inside one of those components too, or the post is refused with the component and its
 page: a FIX note for an edit made inside a component, posted on a page frame, is never seen by the
 designers working on the component. An edit inside other components as well prints a note naming
-them, so the text can say so. Each FIX post that passes is stamped in FIXNOTES; `fixnote` runs the
+them, so the text can say so. A line added to the open thread of its kind of fix (THE FOURTEENTH
+RULE: `fixnote` or `reply` with --cause, the cause that thread carries) gets that note in place of
+the refusal, wherever the thread is pinned: the kind's thread is where its lines go. A refusal asks
+for one thread inside any one of the components, the others named in its text. Each FIX post that
+passes is stamped in FIXNOTES; `fixnote` runs the
 same check for a comment edited with figma_attach.py edit (REST cannot edit) and stamps it.
 
 THE NINTH RULE, `new`, `reply` and `fixnote`. Every FIX note carries its before/after picture IN
@@ -111,17 +116,44 @@ the browser (figma_attach.py, in the same browser as the batch's pictures), and 
 the comment is read back to check it is a chip. Over REST a mention posts as plain text and notifies
 nobody.
 
+THE FOURTEENTH RULE, `new` with a FIX note. One kind of fix, one open thread. The note names its
+kind with --cause, a short slug ("hero-scrim", "description-period"), and is refused while one of
+your open FIX threads in the file carries the same cause: add it to that thread as a numbered line
+(a batch `edit` item) unless --separate lists that thread, which is for a comment already holding 5
+pictures (a kind with more takes a second thread, split by screen). A cause no thread has carried
+needs --new-cause, after reading the open causes the refusal lists, so one kind does not get two
+names. In one batch, a second new thread with a cause is refused unless the one before it carries 5
+pictures. Causes are kept in CAUSES; `cause <key> <thread> <slug>` tags an older thread. Without
+this, one design change repeated across many frames draws one FIX note per frame, and merging them
+afterwards is done by hand.
+
+THE FIFTEENTH RULE, `new` and `reply` with a FIX note. Each node in --edited that one of your other
+open, placement-checked FIX threads also edited is a note that may now state an old value: a later
+fix to the same header height or the same number leaves the earlier note wrong. Refused until each
+such thread is in --separate (read, and about something else), or a batch `edit` or `reply` item
+in the same batch gives it a dated "replaced by" line.
+
 THE BATCH. Posting is one batch per review pass, and the browser opens once for it.
 `batch <items.json>` takes a JSON list, each item one of
-    {"kind": "new",   "key", "node", "text", "separate": [..], "edited": [..], "picture", "pin_ok", "multi_ok", "repost_ok"}
-    {"kind": "reply", "key", "parent", "text", "edited": [..], "picture", "own_last_ok", "multi_ok", "repost_ok"}
-    {"kind": "edit",  "key", "cid", "text" or "text_file", "pictures": [..], "replace"}
+    {"kind": "new",   "key", "node", "text", "separate": [..], "edited": [..], "picture", "pin_ok", "multi_ok", "repost_ok",
+                      "cause", "new_cause"}
+    {"kind": "reply", "key", "parent", "text", "separate": [..], "edited": [..], "picture", "own_last_ok", "multi_ok",
+                      "repost_ok", "cause"}
+    {"kind": "edit",  "key", "cid", "text" or "text_file", "pictures": [..], "replace", "edited": [..],
+                      "cause", "separate": [..]}
 with the same flags as the commands. (1) Every gate runs on every item; one refusal refuses the batch,
 with nothing posted and no browser opened. --check stops here. (2) The items post in order, each
 checked again just before it posts, with the threads this batch already started counted as read and
 separate, since they were approved together. (3) One browser runs every picture, mention and edit
 the batch holds, then each is checked over REST. A post that fails at (2) stops the batch there and
-says what went out.
+says what went out. An edit whose text is a FIX note runs THE EIGHTH, NINTH and FIFTEENTH RULES at
+(1), as a reply does, with its "edited", "cause" and "separate"; each item's notes print there,
+before anyone approves the batch; and the edit is stamped once (3) confirms it, so it needs no
+fixnote. `fixnote`, for a line edited by hand, runs the same rules with --separate.
+
+Text copied from a wrapped quote in the drafts file, with a line break mid-paragraph, is refused by
+`new` and `reply` (drafts_store.wrapped_refusal), because Figma keeps every break. Any --picture is
+attached, not only a FIX note's, and the text gets the "Before and after:" label it goes after.
 
 RULES THIS FILE DOES NOT ENFORCE, because they need judgement:
   - If `search` or `nodes` shows an open thread on the subject, REPLY in it.
@@ -152,8 +184,12 @@ FIXNOTES = os.path.join(CACHE, "figma_fixnotes.json")
 # Written by `delete`, one stamp per comment it removed: {file_key: {node id or "thread <root id>":
 # [epoch, comment id]}}. See THE TWELFTH RULE.
 DELETES = os.path.join(CACHE, "figma_deletes.json")
+# The kind of fix each FIX thread is about, THE FOURTEENTH RULE: {file_key: {thread root id: cause}}.
+# Kept apart from FIXNOTES, whose entry means "placement-checked".
+CAUSES = os.path.join(CACHE, "figma_causes.json")
+CAUSE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*$")
 # Flags that each say a refusal was read and does not apply. parse_flags drops them from the args.
-OK_FLAGS = ("--own-last-ok", "--pin-ok", "--multi-ok", "--repost-ok")
+OK_FLAGS = ("--own-last-ok", "--pin-ok", "--multi-ok", "--repost-ok", "--new-cause")
 # What a FIX note starts with. Anything that reads FIX notes back should share this string.
 DONE_PREFIX = "FIX (done in Figma)"
 FRESH_MIN = 30
@@ -177,6 +213,12 @@ def _drafts_cut(node_id):
 def _drafts_remove(text, **kw):
     ds = _drafts()
     return ds.remove_posted(text, **kw) if ds else None
+
+
+def _drafts_wrapped(text):
+    """drafts_store's refusal of text that keeps a wrapped quote's line breaks, or None."""
+    ds = _drafts()
+    return ds.wrapped_refusal(text) if ds and hasattr(ds, "wrapped_refusal") else None
 
 
 def take_drafts_flag(argv):
@@ -633,9 +675,10 @@ def kinds_path(doc, ids):
     return out
 
 
-def placement_gate(key, anchor_id, edited, doc=None):
+def placement_gate(key, anchor_id, edited, doc=None, cause=None):
     """(refusal text or None, notes). See THE EIGHTH RULE. doc is a planted tree holding the edited
-    ids and the anchor (the selftest); when None, where each sits comes from figma_comments.lineage."""
+    ids and the anchor (the selftest); when None, where each sits comes from figma_comments.lineage.
+    cause: the line goes in the open thread of that kind of fix, so a component it is outside is a note."""
     if not edited:
         return (f"REFUSED: a message starting with \"{DONE_PREFIX}\" needs --edited <id>,<id>...: the "
                 "nodes the fix changed, so the comment can be checked against where they live.", [])
@@ -671,14 +714,34 @@ def placement_gate(key, anchor_id, edited, doc=None):
     rows = [f"  {nm} {i} on page \"{page}\" (edited {', '.join(es)})\n"
             f"    https://www.figma.com/design/{key}/File?node-id={i.replace(':', '-')}"
             for (i, nm), (page, es) in sorted(held.items())]
-    if covered:
-        return None, ["NOTE: the fix also changed nodes inside other components. Say so in the "
-                      "text, or put a note there too:"] + rows
+    if covered or cause:
+        return None, [f"NOTE: the fix changed nodes inside {'other ' if covered else ''}components. " + (
+            "Say so in the text, or put a note there too:" if covered else
+            f"This is the open thread for {cause!r} (THE FOURTEENTH RULE), so the line goes here; "
+            "name them in it:")] + rows
     return (f"REFUSED: the fix changed nodes inside a component, and {_norm(anchor_id)} is inside "
-            "none of them. A designer works on the component, so the comment goes on it:\n"
-            + "\n".join(rows)
-            + "\nPost on the component (or a layer inside it) instead, and give the page thread a "
-              "pointer if it needs one.", [])
+            "none of them. A designer works on the component, so the comment goes in one thread pinned "
+            "inside any one of these, with the others named in its text:\n" + "\n".join(rows), [])
+
+
+def fix_placement(key, comments, root, node, edited, claimed=None, doc=None, causes=None):
+    """THE EIGHTH RULE for a FIX line in thread `root`: placement_gate, with the thread's cause when the
+    line claims the cause that thread carries (THE FOURTEENTH RULE). (refusal or None, notes)."""
+    rid, live = str((root or {}).get("id", "")), open_causes(key, comments, causes)
+    have = next((c for c, ts in live.items() if rid in ts), None)
+    refused, notes = placement_gate(key, node, edited, doc=doc, cause=have if claimed and claimed == have else None)
+    if refused and have and claimed != have:
+        refused += f"\nThread {rid} is the open thread for {have!r}: a line of that kind passes --cause {have}."
+    return refused, notes
+
+
+def fix_line_gate(key, comments, root, node, edited, cause=None, skip=(), own=None, link=None, doc=None,
+                  causes=None, fixnotes=None):
+    """THE EIGHTH and FIFTEENTH RULES for a FIX line going into thread `root`, by reply or by edit.
+    (refusal or None, notes)."""
+    refused, notes = fix_placement(key, comments, root, node, edited, cause, doc=doc, causes=causes)
+    return refused or replaced_gate(key, edited, comments, skip, own=own or (root or {}).get("id"), link=link,
+                                    notes=fixnotes), notes
 
 
 PICTURE_HOW = ("Make the picture with figma_evidence.py sheet (Figma before the edit, Figma after, the build) "
@@ -721,6 +784,15 @@ def pictures_of(picture):
     return [p.strip() for p in (picture or "").split(",") if p.strip()]
 
 
+def picture_step(text, evidence=None, picture=None):
+    """(refusal or None, text to post). A FIX note always carries a picture; any other text that has
+    one gets the same checks and the label figma_attach puts it after, so the picture is not left out."""
+    if not (text.startswith(DONE_PREFIX) or picture):
+        return None, text
+    refused = picture_gate(text, evidence, picture)
+    return refused, (text if refused else with_label(text))
+
+
 def with_label(text):
     """text ending in "Before and after:", where figma_attach.py puts the picture."""
     return text if text.rstrip().endswith(PICTURE_LABEL) else f"{text.rstrip()}\n\n{PICTURE_LABEL}"
@@ -753,9 +825,76 @@ def record_fixnote(key, thread_id, edited, anchor_id, now=None):
     """Stamp a thread's FIX note as placement-checked. Atomic write."""
     now = time.time() if now is None else now
     notes = _load(FIXNOTES)
-    notes.setdefault(key, {})[str(thread_id)] = [now, sorted(_norm(e) for e in edited),
+    had = (notes.get(key) or {}).get(str(thread_id)) or [None, []]
+    notes.setdefault(key, {})[str(thread_id)] = [now, sorted({_norm(e) for e in edited} | set(had[1])),
                                                  _norm(anchor_id) if anchor_id else None]
     _save(FIXNOTES, notes)
+
+
+def record_cause(key, thread_id, cause):
+    """Keep a FIX thread's cause (THE FOURTEENTH RULE). Atomic write."""
+    causes = _load(CAUSES)
+    causes.setdefault(key, {})[str(thread_id)] = cause
+    _save(CAUSES, causes)
+
+
+def _open_roots(comments):
+    return {str(c["id"]) for c in comments if not c.get("parent_id") and not c.get("resolved_at")}
+
+
+def _thread_url(comments, link):
+    """id -> what to print for it: link(comment) when given (figma_comments.permalink takes the comment,
+    not its id), else the id."""
+    by = {str(c["id"]): c for c in comments}
+    return lambda t: link(by[t]) if link and t in by else t
+
+
+def open_causes(key, comments, causes=None):
+    """{cause: [open thread ids]} for the file, from CAUSES and a read of its comments."""
+    causes, live, out = _load(CAUSES) if causes is None else causes, _open_roots(comments), {}
+    for t, c in (causes.get(key) or {}).items():
+        if t in live:
+            out.setdefault(c, []).append(t)
+    return out
+
+
+def cause_gate(key, cause, comments, separate=(), new_cause=False, link=None, causes=None):
+    """None, or the refusal. See THE FOURTEENTH RULE."""
+    causes = _load(CAUSES) if causes is None else causes
+    live = open_causes(key, comments, causes)
+    url = _thread_url(comments, link)
+    listed = "\n".join(f"  {c}: " + ", ".join(url(t) for t in ts) for c, ts in sorted(live.items())) or "  (none)"
+    if not cause:
+        return ("REFUSED: a FIX note names its kind of fix with --cause <slug> (batch: \"cause\"). If one of "
+                f"these open threads is the same kind, add a numbered line to it instead (a batch edit item):\n{listed}")
+    if not CAUSE_RE.match(cause):
+        return f"REFUSED: --cause {cause!r} is not a slug: lower case, digits and hyphens, like \"hero-scrim\"."
+    same = [t for t in live.get(cause, []) if t not in {str(x) for x in separate}]
+    if same:
+        return (f"REFUSED: your open FIX thread {', '.join(url(t) for t in same)} is already about {cause!r}. Add this "
+                "as a numbered line to it (a batch edit item). If that comment holds 5 pictures already, list it in "
+                "--separate to start a second thread for the next screens.")
+    if not new_cause and cause not in {c for c in (causes.get(key) or {}).values()}:
+        return (f"REFUSED: no thread has carried the cause {cause!r}. Read the open ones; if this is one of them, "
+                f"use its name. If it is a new kind, re-run with --new-cause (batch: \"new_cause\").\n{listed}")
+    return None
+
+
+def replaced_gate(key, edited, comments, skip=(), own=None, link=None, notes=None):
+    """None, or the refusal. See THE FIFTEENTH RULE. skip: threads read and separate, or that this batch
+    edits or replies in; own: the thread this note goes into."""
+    notes = (_load(FIXNOTES) if notes is None else notes).get(key) or {}
+    live, mine = _open_roots(comments), {_norm(e) for e in edited}
+    skip = {str(x) for x in skip} | ({str(own)} if own else set())
+    url = _thread_url(comments, link)
+    hits = sorted((t, sorted(mine & {_norm(e) for e in v[1]})) for t, v in notes.items()
+                  if t in live and t not in skip and mine & {_norm(e) for e in v[1]})
+    if not hits:
+        return None
+    rows = "\n".join(f"  {url(t)} also edited {', '.join(n[:3])}" for t, n in hits)
+    return ("REFUSED: other open FIX notes of yours edited the same nodes, so one of them may now state an old "
+            f"value:\n{rows}\nIn the same batch, give each a dated \"replaced by\" line (an edit item, or a reply "
+            "when it has replies), or list it in separate if it is about something else.")
 
 
 def _me():
@@ -810,21 +949,22 @@ def mention_gate(text, comments):
 
 
 def check_reply(key, parent_id, text, own_last_ok=False, edited=(), evidence=None, multi_ok=False,
-                repost_ok=False, picture=None):
-    """(refusal or None, plan): every gate for a reply, and what post() sends. Posts nothing."""
+                repost_ok=False, picture=None, separate=(), also=(), cause=None):
+    """(refusal or None, plan): every gate for a reply, and what post() sends. Posts nothing. also: the
+    threads this batch edits or replies in (THE FIFTEENTH RULE)."""
     cs = _req(f"{API}/files/{key}/comments").get("comments", [])
     node = anchor(key, parent_id, cs)
     root = _root_of(cs, parent_id)
-    refused = (question_gate(text, multi_ok)
+    refused = (question_gate(text, multi_ok) or _drafts_wrapped(text)
                or (None if repost_ok or root is None else repost_gate(key, f"thread {root['id']}"))
                or (None if own_last_ok else own_last_gate(key, parent_id, cs, _me(), _link(key)))
                or gate(key, node) or drift_gate(key, node) or mention_gate(text, cs))
     notes = []
     if not refused and text.startswith(DONE_PREFIX):
-        refused, notes = placement_gate(key, node, edited)
-    if not refused and text.startswith(DONE_PREFIX):
-        refused = picture_gate(text, evidence, picture)
-        text = text if refused else with_label(text)
+        refused, notes = fix_line_gate(key, cs, root, node, edited, cause, tuple(separate) + tuple(also),
+                                       own=(root or {}).get("id", str(parent_id)), link=_link(key))
+    if not refused:
+        refused, text = picture_step(text, evidence, picture)
     import figma_attach
     return refused, {"kind": "reply", "key": key, "parent": str(parent_id), "node": node, "text": text,
                      "root": (root or {}).get("id", str(parent_id)), "edited": edited, "picture": picture,
@@ -833,15 +973,16 @@ def check_reply(key, parent_id, text, own_last_ok=False, edited=(), evidence=Non
 
 
 def check_new(key, node_id, text, separate=(), edited=(), evidence=None, pin_ok=False, multi_ok=False,
-              repost_ok=False, picture=None):
-    """(refusal or None, plan): every gate for a new thread, and what post() sends. Posts nothing."""
+              repost_ok=False, picture=None, cause=None, new_cause=False, also=()):
+    """(refusal or None, plan): every gate for a new thread, and what post() sends. Posts nothing. also:
+    the threads this batch edits or replies in (THE FIFTEENTH RULE)."""
     docs = {}
 
     def fetch(k, n):  # drift_gate and pin_spot read the same frame: one call
         if n not in docs:
             docs[n] = fetch_node(k, n)
         return docs[n]
-    refused = (pin_gate(node_id) or question_gate(text, multi_ok) or _drafts_cut(node_id)
+    refused = (pin_gate(node_id) or question_gate(text, multi_ok) or _drafts_wrapped(text) or _drafts_cut(node_id)
                or (None if repost_ok else repost_gate(key, node_id))
                or search_gate(key) or gate(key, node_id) or drift_gate(key, node_id, fetch))
     notes, offset, cs = [], None, []
@@ -852,16 +993,18 @@ def check_new(key, node_id, text, separate=(), edited=(), evidence=None, pin_ok=
     if not refused and text.startswith(DONE_PREFIX):
         refused, placed = placement_gate(key, node_id, edited)
         notes += placed
-    if not refused and text.startswith(DONE_PREFIX):
-        refused = picture_gate(text, evidence, picture)
-        text = text if refused else with_label(text)
+    if not refused:
+        refused, text = picture_step(text, evidence, picture)
     if not refused:
         cs = _req(f"{API}/files/{key}/comments").get("comments", [])
         refused = (family_gate(key, node_id, separate, cs, link=_link(key))
                    or dup_gate(key, node_id, separate, cs, link=_link(key))
                    or mention_gate(text, cs))
+        if not refused and text.startswith(DONE_PREFIX):
+            refused = (cause_gate(key, cause, cs, separate, new_cause, link=_link(key))
+                       or replaced_gate(key, edited, cs, tuple(separate) + tuple(also), link=_link(key)))
     import figma_attach
-    return refused, {"kind": "new", "key": key, "node": node_id, "text": text, "edited": edited,
+    return refused, {"kind": "new", "key": key, "node": node_id, "text": text, "edited": edited, "cause": cause,
                      "picture": picture, "notes": notes,
                      "mentions": figma_attach.handles_in(text, known_handles(cs)),
                      "body": {"message": text, "client_meta": {"node_id": node_id, "node_offset": offset}}}
@@ -889,6 +1032,10 @@ def post(plan):
     thread = plan["root"] if plan["kind"] == "reply" else cid
     if text.startswith(DONE_PREFIX):
         record_fixnote(key, thread, plan["edited"], plan["node"])
+        if plan["kind"] == "new" and plan.get("cause"):
+            record_cause(key, thread, plan["cause"])
+    # Any --picture goes in, not only a FIX note's.
+    if plan.get("picture"):
         jobs.append({"key": key, "cid": cid, "pictures": pictures_of(plan["picture"]),
                      "thread": thread, "node": plan["node"], "picture": plan["picture"]})
     if plan["mentions"]:
@@ -912,6 +1059,9 @@ def run_after(jobs, runner=None):
     code, codes = runner([{k: v for k, v in j.items() if k in keep} for j in jobs]) if runner else (2, {})
     for j in jobs:
         if codes.get(str(j["cid"])) == 0:
+            if j.get("fix"):
+                record_fixnote(j["key"], *j["fix"])
+                print(f"  thread {j['fix'][0]}: the edit is in, placement was checked before it, stamped.")
             continue
         if "text" in j:
             print(f"  EDIT NOT MADE on {j['cid']}: run figma_attach.py edit {j['key']} {j['cid']} --text-file <txt>"
@@ -925,8 +1075,9 @@ def run_after(jobs, runner=None):
 
 
 def reply(key, parent_id, text, own_last_ok=False, edited=(), evidence=None, multi_ok=False,
-          repost_ok=False, picture=None):
-    refused, plan = check_reply(key, parent_id, text, own_last_ok, edited, evidence, multi_ok, repost_ok, picture)
+          repost_ok=False, picture=None, separate=(), cause=None):
+    refused, plan = check_reply(key, parent_id, text, own_last_ok, edited, evidence, multi_ok, repost_ok, picture,
+                                separate, cause=cause)
     if refused:
         sys.exit(refused)
     _, jobs = post(plan)
@@ -934,8 +1085,9 @@ def reply(key, parent_id, text, own_last_ok=False, edited=(), evidence=None, mul
 
 
 def new(key, node_id, text, separate=(), edited=(), evidence=None, pin_ok=False, multi_ok=False,
-        repost_ok=False, picture=None):
-    refused, plan = check_new(key, node_id, text, separate, edited, evidence, pin_ok, multi_ok, repost_ok, picture)
+        repost_ok=False, picture=None, cause=None, new_cause=False):
+    refused, plan = check_new(key, node_id, text, separate, edited, evidence, pin_ok, multi_ok, repost_ok, picture,
+                              cause, new_cause)
     if refused:
         sys.exit(refused)
     _, jobs = post(plan)
@@ -943,24 +1095,39 @@ def new(key, node_id, text, separate=(), edited=(), evidence=None, pin_ok=False,
 
 
 def _check_item(it, extra_separate=()):
-    """(refusal or None, plan) for one batch item. An edit item is checked by figma_attach."""
+    """(refusal or None, plan) for one batch item. An edit item is checked by figma_attach, from REST
+    alone: no browser."""
     kind = it.get("kind")
     flags = dict(evidence=None, multi_ok=it.get("multi_ok", False), repost_ok=it.get("repost_ok", False),
                  picture=it.get("picture"), edited=tuple(it.get("edited", ())))
+    also = tuple(it.get("_also", ()))      # batch() sets it: the threads the batch edits or replies in
     if kind == "new":
         return check_new(it["key"], it["node"], it["text"],
                          separate=tuple(it.get("separate", ())) + tuple(extra_separate),
-                         pin_ok=it.get("pin_ok", False), **flags)
+                         pin_ok=it.get("pin_ok", False), cause=it.get("cause"),
+                         new_cause=it.get("new_cause", False), also=also, **flags)
     if kind == "reply":
-        return check_reply(it["key"], it["parent"], it["text"], own_last_ok=it.get("own_last_ok", False), **flags)
+        return check_reply(it["key"], it["parent"], it["text"], own_last_ok=it.get("own_last_ok", False),
+                           separate=tuple(it.get("separate", ())), also=also, cause=it.get("cause"), **flags)
     if kind == "edit":
         import figma_attach
         comments, me = figma_attach._read(it["key"])
         if comments is None:
             return "DID NOT RUN: the Figma API failed.", None
+        root = _root_of(comments, it["cid"])
+        node = ((root or {}).get("client_meta") or {}).get("node_id") or ""
+        notes, fix = [], bool(root) and it["text"].startswith(DONE_PREFIX) and [root["id"], flags["edited"], node or None]
+        refused = None
+        if fix:
+            refused, notes = fix_line_gate(it["key"], comments, root, node, flags["edited"], it.get("cause"),
+                                           tuple(it.get("separate", ())) + also, link=_link(it["key"]))
+            refused = refused or picture_gate(it["text"], posting=False)
+        if refused:
+            return refused, None
         job = {"key": it["key"], "cid": str(it["cid"]), "text": it["text"], "pictures": it.get("pictures", []),
-               "replace": it.get("replace", False)}
-        return figma_attach.job_refusal(job, comments, me.get("id"), figma_attach._stamps()), {"kind": "edit", "job": job}
+               "replace": it.get("replace", False), **({"fix": fix} if fix else {})}
+        return (figma_attach.job_refusal(job, comments, me.get("id"), figma_attach._stamps()),
+                {"kind": "edit", "job": job, "notes": notes})
     return f"REFUSED: unknown kind {kind!r}; use new, reply or edit.", None
 
 
@@ -971,13 +1138,31 @@ def batch(path, check_only=False, checker=None, poster=None, runner=None):
     for it in items:
         if "text_file" in it:
             it["text"] = open(it["text_file"], encoding="utf-8").read()
-    # 1. Every gate on every item, with nothing posted.
-    refusals = []
+    # The threads this batch edits or replies in, for THE FIFTEENTH RULE.
+    touched = {}
+    for it in items:
+        t = it.get("cid") if it.get("kind") == "edit" else it.get("parent") if it.get("kind") == "reply" else None
+        if t:
+            touched.setdefault(it.get("key"), set()).add(str(t))
+    for it in items:
+        it["_also"] = sorted(touched.get(it.get("key"), ()))
+    # 1. Every gate on every item, with nothing posted. THE FOURTEENTH RULE within the batch first:
+    #    a second new thread with a cause needs the one before it full (5 pictures).
+    refusals, last = [], {}
+    for i, it in enumerate(items, 1):
+        if it.get("kind") == "new" and it.get("cause") and str(it.get("text", "")).startswith(DONE_PREFIX):
+            k = (it.get("key"), it["cause"])
+            if k in last and len(pictures_of(items[last[k] - 1].get("picture"))) < 5:
+                refusals.append(f"  item {i} (new {it.get('node')}): REFUSED: item {last[k]} already starts a thread "
+                                f"about {it['cause']!r} and holds fewer than 5 pictures; put this in it.")
+            last[k] = i
     for i, it in enumerate(items, 1):
         try:
-            refused, _ = checker(it)
+            refused, plan = checker(it)
         except SystemExit as e:
-            refused = str(e)
+            refused, plan = str(e), None
+        for n in (plan or {}).get("notes") or []:
+            print(f"  item {i}: {n}")
         if refused:
             refusals.append(f"  item {i} ({it.get('kind')} {it.get('node') or it.get('parent') or it.get('cid')}): {refused}")
     if refusals:
@@ -1017,9 +1202,11 @@ def batch(path, check_only=False, checker=None, poster=None, runner=None):
     return code if posted + n_edits == len(items) else 2
 
 
-def fixnote(key, comment_id, text, edited=(), evidence=None):
-    """THE EIGHTH and NINTH RULES for a FIX comment edited with figma_attach.py edit, then the FIXNOTES
-    stamp. Posts nothing."""
+def fixnote(key, comment_id, text, edited=(), evidence=None, cause=None, separate=()):
+    """THE EIGHTH, NINTH and FIFTEENTH RULES for a FIX comment edited with figma_attach.py edit, then the
+    FIXNOTES stamp. cause: the kind of fix the edited line is (THE FOURTEENTH RULE); separate: the older
+    notes on the same nodes that hold their "replaced by" line, or are about something else. Posts
+    nothing."""
     if not text.startswith(DONE_PREFIX):
         sys.exit(f"REFUSED: the text does not start with \"{DONE_PREFIX}\", so it is not a FIX note.")
     cs = _req(f"{API}/files/{key}/comments").get("comments", [])
@@ -1027,9 +1214,8 @@ def fixnote(key, comment_id, text, edited=(), evidence=None):
     if root is None:
         sys.exit(f"REFUSED: comment {comment_id} is not in file {key}.")
     node = (root.get("client_meta") or {}).get("node_id")
-    refused, notes = placement_gate(key, node, edited)
-    if not refused:
-        refused = picture_gate(text, evidence, posting=False)
+    refused, notes = fix_line_gate(key, cs, root, node, edited, cause, separate, link=_link(key))
+    refused = refused or picture_gate(text, evidence, posting=False)
     if refused:
         sys.exit(refused)
     if notes:
@@ -1037,6 +1223,27 @@ def fixnote(key, comment_id, text, edited=(), evidence=None):
     record_fixnote(key, root["id"], edited, node)
     print(f"  thread {root['id']} on {node}: placement checked and stamped. If the comment does not "
           "hold this text yet, put it there with figma_attach.py edit.")
+
+
+def cause(key, thread_id=None, slug=None):
+    """THE FOURTEENTH RULE's record by hand: tag an open FIX thread of yours with its cause, or list the
+    open ones. Writes CAUSES only; nothing in Figma."""
+    cs = _req(f"{API}/files/{key}/comments").get("comments", [])
+    if thread_id is None:
+        live = open_causes(key, cs)
+        for c, ts in sorted(live.items()):
+            print(f"{c}: " + ", ".join(_thread_url(cs, _link(key))(t) for t in ts))
+        print(f"{sum(len(v) for v in live.values())} open thread(s) under {len(live)} cause(s) in {key}.")
+        return
+    root = next((c for c in cs if str(c["id"]) == str(thread_id)), None)
+    if root is None or root.get("parent_id"):
+        sys.exit(f"REFUSED: {thread_id} is not a thread root in {key}.")
+    if not (root.get("message") or "").startswith(DONE_PREFIX):
+        sys.exit(f"REFUSED: thread {thread_id} is not a FIX note.")
+    if not CAUSE_RE.match(slug or ""):
+        sys.exit(f"REFUSED: {slug!r} is not a slug: lower case, digits and hyphens.")
+    record_cause(key, thread_id, slug)
+    print(f"  thread {thread_id} is about {slug!r}{'' if root.get('resolved_at') else ' (open)'}.")
 
 
 def delete(key, cid):
@@ -1054,7 +1261,7 @@ def delete(key, cid):
 
 def parse_flags(argv):
     """(positional args, --own-last-ok given, --separate ids, --edited ids, --evidence id or None,
-    --picture file or None). The ids split on commas or spaces. Every flag in OK_FLAGS is dropped from
+    --picture file or None, --cause slug or None). The ids split on commas or spaces. Every flag in OK_FLAGS is dropped from
     the args; the caller reads the others from argv. --evidence is parsed so picture_gate can refuse it."""
     args = [x for x in argv if x not in OK_FLAGS]
     lists = {}
@@ -1064,19 +1271,24 @@ def parse_flags(argv):
             i = args.index(flag)
             lists[flag] = tuple(x for x in " ".join(args[i + 1:i + 2]).replace(",", " ").split())
             del args[i:i + 2]
-    picture = None
+    picture = cause = None
     if "--picture" in args:
         i = args.index("--picture")
         picture = (args[i + 1:i + 2] or [None])[0]
         del args[i:i + 2]
+    if "--cause" in args:
+        i = args.index("--cause")
+        cause = (args[i + 1:i + 2] or [None])[0]
+        del args[i:i + 2]
     evidence = lists["--evidence"][0] if lists["--evidence"] else None
-    return args, "--own-last-ok" in argv, lists["--separate"], lists["--edited"], evidence, picture
+    return args, "--own-last-ok" in argv, lists["--separate"], lists["--edited"], evidence, picture, cause
 
 
 def selftest():
     """Planted cases against a temp stamp file and a stub Figma. No network, no post."""
-    global READS, SEARCHES, FIXNOTES, DELETES
+    global READS, SEARCHES, FIXNOTES, DELETES, CAUSES
     saved, tmp = (READS, SEARCHES), tempfile.mkdtemp()
+    CAUSES = os.path.join(tmp, "causes.json")    # no case may write the real one
     atexit.register(shutil.rmtree, tmp, True)
     READS, SEARCHES = os.path.join(tmp, "reads.json"), os.path.join(tmp, "searches.json")
     band = {"id": "1:1", "type": "FRAME", "itemSpacing": 12,
@@ -1194,6 +1406,26 @@ def selftest():
         case("edited two components, comment on one: posts with a note naming the other",
              None if got[0] is None and any("C2" in n for n in got[1]) else got, False)
         case("edited a component and a page layer, comment on the page: refused", pg("PF2", ["L", "PT"])[0], True)
+        # THE FOURTEENTH RULE's thread takes its kind's line: r9 carries menu-order, pinned on page frame PF.
+        open9 = [{"id": "r9", "client_meta": {"node_id": "PF"}}]
+        fp = lambda claimed: fix_placement("K", open9, open9[0], "PF", ["L"], claimed, doc=doc,
+                                           causes={"K": {"r9": "menu-order"}})
+        got = fp("menu-order")
+        case("a line of the thread's own cause, editing a component's layer, on a page-frame thread: passes, "
+             "the note naming the component and the cause",
+             None if got[0] is None and any("menu-order" in n for n in got[1]) and any(" S " in n for n in got[1])
+             else got, False)
+        got = [fp(c)[0] for c in (None, "hero-scrim")]
+        case("...with no --cause, or another kind's: refused, asking for one thread and naming the thread's cause",
+             got if all(g and "one thread" in g and "--cause menu-order" in g for g in got) else None, True)
+        fl = lambda notes: fix_line_gate("K", open9 + [{"id": "r8"}], open9[0], "PF", ["L"], "menu-order", doc=doc,
+                                         causes={"K": {"r9": "menu-order"}}, fixnotes=notes)
+        got = fl({"K": {"r8": [0, ["L"], "S"]}})
+        case("an edit's FIX line on its cause thread: another open note that edited the same layer still needs its "
+             "replaced-by line (THE FIFTEENTH RULE at batch --check, before the edit)",
+             got[0] if got[0] and "r8" in got[0] else None, True)
+        case("...and with no other note on that layer it passes with the placement note",
+             None if fl({"K": {}})[0] is None and fl({"K": {}})[1] else fl({"K": {}}), False)
 
         fix_saved, FIXNOTES = FIXNOTES, os.path.join(tmp, "fixnotes.json")
         try:
@@ -1201,6 +1433,10 @@ def selftest():
             got = _load(FIXNOTES).get("K", {}).get("r1")
             case("a passing fix note is stamped with its edits and anchor",
                  None if got and got[1:] == [["L"], "S"] else got, False)
+            record_fixnote("K", "r1", ["C2t"], "S")
+            got = _load(FIXNOTES).get("K", {}).get("r1")
+            case("a second line's stamp keeps the first line's edits (THE FIFTEENTH RULE still sees them)",
+                 None if got and got[1:] == [["C2t", "L"], "S"] else got, False)
         finally:
             FIXNOTES = fix_saved
 
@@ -1255,19 +1491,19 @@ def selftest():
 
         got = parse_flags(["new", "K", "1:2", "the text", "--separate", "t1, t3"])
         case("--separate after the text is parsed off it",
-             None if got == (["new", "K", "1:2", "the text"], False, ("t1", "t3"), (), None, None) else got, False)
+             None if got == (["new", "K", "1:2", "the text"], False, ("t1", "t3"), (), None, None, None) else got, False)
         got = parse_flags(["reply", "--own-last-ok", "K", "r1", "the text"])
         case("--own-last-ok anywhere is parsed off",
-             None if got == (["reply", "K", "r1", "the text"], True, (), (), None, None) else got, False)
+             None if got == (["reply", "K", "r1", "the text"], True, (), (), None, None, None) else got, False)
         got = parse_flags(["fixnote", "K", "r1", "--edited", "1:2,3:4", "the text"])
         case("--edited before the text is parsed off it",
-             None if got == (["fixnote", "K", "r1", "the text"], False, (), ("1:2", "3:4"), None, None) else got, False)
+             None if got == (["fixnote", "K", "r1", "the text"], False, (), ("1:2", "3:4"), None, None, None) else got, False)
         got = parse_flags(["new", "K", "1:2", "--evidence", "1234-5679", "the text", "--edited", "9:9"])
         case("--evidence is still parsed off, so the gate can refuse it",
-             None if got == (["new", "K", "1:2", "the text"], False, (), ("9:9",), "1234-5679", None) else got, False)
+             None if got == (["new", "K", "1:2", "the text"], False, (), ("9:9",), "1234-5679", None, None) else got, False)
         got = parse_flags(["new", "K", "1:2", "the text", "--picture", "/x/sheet.jpg", "--edited", "9:9"])
         case("--picture is parsed off, one file",
-             None if got == (["new", "K", "1:2", "the text"], False, (), ("9:9",), None, "/x/sheet.jpg") else got, False)
+             None if got == (["new", "K", "1:2", "the text"], False, (), ("9:9",), None, "/x/sheet.jpg", None) else got, False)
         case("a pin on a layer inside an instance is refused", pin_gate("I4321:8765;1:2"), True)
         case("the refusal names the instance to pin on",
              None if "4321:8765" in (pin_gate("I4321:8765;1:2") or "") else "no instance named", False)
@@ -1348,7 +1584,38 @@ def selftest():
             DELETES = del_saved
         got = parse_flags(["new", "K", "1:2", "the text", "--pin-ok", "--multi-ok", "--repost-ok"])
         case("--pin-ok, --multi-ok and --repost-ok are parsed off",
-             None if got == (["new", "K", "1:2", "the text"], False, (), (), None, None) else got, False)
+             None if got == (["new", "K", "1:2", "the text"], False, (), (), None, None, None) else got, False)
+        got = parse_flags(["new", "K", "1:2", "the text", "--cause", "hero-scrim", "--new-cause"])
+        case("--cause is parsed off, one slug, and --new-cause with it",
+             None if got == (["new", "K", "1:2", "the text"], False, (), (), None, None, "hero-scrim") else got, False)
+
+        # THE FOURTEENTH RULE: r1 is an open thread about hero-scrim, r2 a resolved one about faq.
+        cms = [{"id": "r1", "parent_id": "", "resolved_at": None}, {"id": "r2", "parent_id": "", "resolved_at": "x"},
+               {"id": "r3", "parent_id": "", "resolved_at": None}]
+        cz = {"K": {"r1": "hero-scrim", "r2": "faq"}}
+        cg = lambda cause, sep=(), new=False: cause_gate("K", cause, cms, sep, new, causes=cz)
+        case("a FIX note with no cause: refused, listing the open causes",
+             None if "hero-scrim: r1" in (cg(None) or "") else (cg(None) or "not refused"), False)
+        case("a cause that is not a slug: refused", cg("Hero Scrim"), True)
+        case("a cause an open thread of yours carries: refused, naming it", cg("hero-scrim"), True)
+        case("... posts when --separate lists that thread (it holds 5 pictures)", cg("hero-scrim", ["r1"]), False)
+        case("a cause only a resolved thread carried: posts, no --new-cause needed", cg("faq"), False)
+        case("a cause no thread has carried: refused without --new-cause", cg("footer-gap"), True)
+        case("... posts with --new-cause", cg("footer-gap", new=True), False)
+        # THE FIFTEENTH RULE: r1 (open) and r2 (resolved) both edited 5:5; r3 (open) edited 6:6.
+        fx = {"K": {"r1": [0, ["5:5"], "5:1"], "r2": [0, ["5:5"], "5:1"], "r3": [0, ["6:6"], "6:1"]}}
+        rg = lambda edited, skip=(), own=None: replaced_gate("K", edited, cms, skip, own, notes=fx)
+        case("a FIX note editing a node an open FIX note of yours edited: refused, naming it",
+             None if "r1 also edited 5:5" in (rg(["5:5", "7:7"]) or "") else (rg(["5:5", "7:7"]) or "not refused"), False)
+        case("... posts when that thread is in separate, or the batch edits it", rg(["5:5"], ["r1"]), False)
+        case("... posts as a reply into that same thread", rg(["5:5"], own="r1"), False)
+        case("a node only a resolved note edited, or none did: posts", rg(["7:7"]) or rg(["8:8"]), False)
+        lk = lambda c: f"https://x#{c['id']}"
+        case("a refusal links each thread it names (link takes the comment, as figma_comments.permalink does)",
+             None if "https://x#r1" in (cause_gate("K", "hero-scrim", cms, causes=cz, link=lk) or "")
+             and "https://x#r1" in (replaced_gate("K", ["5:5"], cms, notes=fx, link=lk) or "") else "no link", False)
+        case("instance-layer ids compare in either form",
+             replaced_gate("K", ["I1:2;3:4"], cms, notes={"K": {"r3": [0, ["I1-2;3-4"], None]}}), True)
 
         # THE THIRTEENTH RULE.
         people = [{"user": {"handle": "Rivera, Ana"}}, {"user": {"handle": "Okafor, Lee"}}]
@@ -1381,6 +1648,17 @@ def selftest():
             def runner(jobs):
                 runs.append(len(jobs))
                 return 0, {j["cid"]: 0 for j in jobs}
+            fix_saved, FIXNOTES = FIXNOTES, os.path.join(bdir, "fixnotes.json")
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run_after([{"key": "K", "cid": "e1", "text": "FIX (done in Figma): x.", "fix": ["e1", ["L"], "PF"]},
+                               {"key": "K", "cid": "e2", "text": "FIX (done in Figma): y.", "fix": ["e2", ["M"], "PF"]}],
+                              lambda jobs: (1, {"e1": 0, "e2": 1}))
+                got = sorted(_load(FIXNOTES).get("K", {}))
+            finally:
+                FIXNOTES = fix_saved
+            case("batch: a FIX edit the browser confirmed is stamped, one it did not make is not", None if got == ["e1"]
+                 else got, False)
             out = batch(bpath, checker=checker, poster=poster, runner=runner)
             case("batch: 3 approved items post in order, and every picture and mention goes to ONE browser run",
                  None if (out, len(posts), runs) == (0, 3, [2]) else (out, len(posts), runs), False)
@@ -1400,6 +1678,106 @@ def selftest():
                     run_after(jobs, runner)
             case("batch: posting item by item opens a browser per post (the count catches the old way)",
                  None if runs == [1, 1] else runs, False)
+            # THE FOURTEENTH RULE inside one batch: two new threads with one cause.
+            two = [{"kind": "new", "key": "K", "node": "1:2", "text": "FIX (done in Figma): a.", "cause": "faq",
+                    "picture": pic}, {"kind": "new", "key": "K", "node": "1:3", "text": "FIX (done in Figma): b.",
+                                      "cause": "faq", "picture": pic}]
+            tpath = os.path.join(bdir, "two.json")
+            json.dump(two, open(tpath, "w", encoding="utf-8"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                out = batch(tpath, check_only=True, checker=checker, poster=poster, runner=runner)
+            case("batch: a second new thread with the same cause, the first under 5 pictures: refused",
+                 None if out == 1 else out, False)
+            two[0]["picture"] = ",".join([pic] * 5)
+            json.dump(two, open(tpath, "w", encoding="utf-8"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                out = batch(tpath, check_only=True, checker=checker, poster=poster, runner=runner)
+            case("... checked when the first already holds 5 pictures", None if out == 0 else out, False)
+            json.dump(two[:1] + [{"kind": "edit", "key": "K", "cid": "r9", "text": "x"}], open(tpath, "w", encoding="utf-8"))
+            seen_items = []
+            with contextlib.redirect_stdout(io.StringIO()):
+                batch(tpath, check_only=True, checker=lambda it, extra=(): seen_items.append(it.get("_also")) or (None, {}),
+                      poster=poster, runner=runner)
+            case("batch: every item learns the threads the batch edits (for THE FIFTEENTH RULE)",
+                 None if seen_items == [["r9"], ["r9"]] else seen_items, False)
+            # post() itself, with the API stubbed: a picture goes to the browser whatever the text's kind.
+            g = globals()
+            saved_post = g["_req"], g["_drafts_remove"], g["record_fixnote"]
+            try:
+                g["_req"] = lambda url, body=None, method="GET": {"id": "c9"}
+                g["_drafts_remove"] = lambda *a, **k: None
+                g["record_fixnote"] = lambda *a, **k: None
+                qplan = {"kind": "new", "key": "K", "node": "1:2", "text": "Q: should this use a variable?",
+                         "edited": (), "picture": pic, "notes": [], "mentions": [], "body": {}}
+                with contextlib.redirect_stdout(io.StringIO()):
+                    _, qjobs = post(qplan)
+                    _, njobs = post(dict(qplan, picture=None))
+                case("post: a Q with --picture queues its picture for the browser",
+                     None if [j.get("pictures") for j in qjobs] == [[pic]] else qjobs, False)
+                case("post: a Q with no picture queues no browser job", None if njobs == [] else njobs, False)
+                got = picture_step("Q: should this use a variable?", picture=pic)
+                case("a Q with --picture is posted ending in the label figma_attach needs",
+                     None if got[0] is None and got[1].endswith(PICTURE_LABEL) else got, False)
+                got = picture_step("Q: should this use a variable?")
+                case("a Q with no picture is posted as written", None if got == (None, "Q: should this use a variable?")
+                     else got, False)
+                got = picture_step("Q: should this use a variable?", picture=pic + ".txt")
+                case("a Q whose --picture is not a picture file: refused", got[0], True)
+            finally:
+                g["_req"], g["_drafts_remove"], g["record_fixnote"] = saved_post
+            # A FIX edit item: the real _check_item runs the placement and replaced-by rules from REST alone.
+            import figma_attach as _fa
+            saved_read = _fa._read
+            try:
+                fixed = {"id": "72", "parent_id": "", "user": {"id": "me", "handle": "Owner"},
+                         "message": "FIX (done in Figma): the order matches the menu.", "created_at": "2026-01-01T00:00:00Z",
+                         "resolved_at": None, "client_meta": {"node_id": "7:7"}}
+                _fa._read = lambda key, md=False: ([fixed], {"id": "me", "email": "a@b.c"})
+                rpath = os.path.join(bdir, "edit.json")
+                gates, saved_gate = [], g["fix_line_gate"]
+                edit = {"kind": "edit", "key": "K", "cid": "72", "edited": ["8:8"], "cause": "menu-order",
+                        "text": "FIX (done in Figma): the order matches the menu, and the footer's too."}
+                try:
+                    g["fix_line_gate"] = lambda *a, **k: gates.append((a, k)) or ("REFUSED: planted.", [])
+                    got = _check_item(edit)
+                    case("batch: a FIX edit runs THE EIGHTH and FIFTEENTH RULES before the edit, with its edited "
+                         "layers and cause, and their refusal refuses the item",
+                         None if got == ("REFUSED: planted.", None) and gates and gates[0][0][4:6] == (("8:8",), "menu-order")
+                         else (got, gates), False)
+                    g["fix_line_gate"] = lambda *a, **k: (None, ["NOTE: planted placement note."])
+                    got = _check_item(edit)
+                    case("...passing, its job carries the stamp for step 3 (thread, edits, anchor)",
+                         None if got[1] and got[1]["job"].get("fix") == ["72", ("8:8",), "7:7"] else got, False)
+                    json.dump([edit], open(rpath, "w", encoding="utf-8"))
+                    said = io.StringIO()
+                    with contextlib.redirect_stdout(said):
+                        out = batch(rpath, check_only=True, poster=poster, runner=runner)
+                    case("batch --check prints a FIX edit's placement note before anyone approves the batch",
+                         None if out == 0 and "item 1: NOTE: planted placement note." in said.getvalue()
+                         else (out, said.getvalue()), False)
+                    got = _check_item(dict(edit, text="Q: should this use a variable?"))
+                    case("...an edit that is not a FIX note carries no stamp", (got[1] or {}).get("job", {}).get("fix"), False)
+                    saved_fn = g["_req"], g["record_fixnote"], g["_link"]
+                    stamps, gates[:] = [], []
+                    try:
+                        g["_req"] = lambda url, body=None, method="GET": {"comments": [fixed]}
+                        g["record_fixnote"] = lambda *a, **k: stamps.append(a)
+                        g["_link"] = lambda key: str
+                        g["fix_line_gate"] = lambda *a, **k: gates.append((a, k)) or ("REFUSED: planted.", [])
+                        try:
+                            fixnote("K", "72", edit["text"], ("8:8",), cause="menu-order", separate=("r5",))
+                            got = None
+                        except SystemExit as e:
+                            got = str(e)
+                        case("fixnote runs THE FIFTEENTH RULE too, with --separate, and its refusal stamps nothing",
+                             None if got == "REFUSED: planted." and gates and gates[0][0][6] == ("r5",) and not stamps
+                             else (got, gates, stamps), False)
+                    finally:
+                        g["_req"], g["record_fixnote"], g["_link"] = saved_fn
+                finally:
+                    g["fix_line_gate"] = saved_gate
+            finally:
+                _fa._read = saved_read
         finally:
             shutil.rmtree(bdir, ignore_errors=True)
     finally:
@@ -1415,9 +1793,9 @@ if __name__ == "__main__":
         sys.exit(selftest())
     if sys.argv[1:2] == ["batch"] and len(sys.argv) >= 3:
         sys.exit(batch(sys.argv[2], check_only="--check" in sys.argv[3:]))
-    args, own_last_ok, separate, edited, evidence, picture = parse_flags(sys.argv[1:])
+    args, own_last_ok, separate, edited, evidence, picture, cause_slug = parse_flags(sys.argv[1:])
     # Each command's own count. `reply K r1` with no text passed a shared `< 3` and died on args[3].
-    need = {"reply": 4, "new": 4, "fixnote": 4, "delete": 3}
+    need = {"reply": 4, "new": 4, "fixnote": 4, "delete": 3, "cause": 2}
     cmd = args[0] if args else ""
     if {"-h", "--help"} & set(args):
         print(__doc__)
@@ -1426,8 +1804,9 @@ if __name__ == "__main__":
         sys.exit(__doc__)
     ok = lambda flag: flag in sys.argv
     {"reply": lambda: reply(args[1], args[2], args[3], own_last_ok, edited, evidence,
-                            ok("--multi-ok"), ok("--repost-ok"), picture),
+                            ok("--multi-ok"), ok("--repost-ok"), picture, separate, cause_slug),
      "new": lambda: new(args[1], args[2], args[3], separate, edited, evidence,
-                        ok("--pin-ok"), ok("--multi-ok"), ok("--repost-ok"), picture),
-     "fixnote": lambda: fixnote(args[1], args[2], args[3], edited, evidence),
+                        ok("--pin-ok"), ok("--multi-ok"), ok("--repost-ok"), picture, cause_slug, ok("--new-cause")),
+     "cause": lambda: cause(args[1], *(args[2:4] if len(args) >= 4 else ())),
+     "fixnote": lambda: fixnote(args[1], args[2], args[3], edited, evidence, cause_slug, separate),
      "delete": lambda: delete(args[1], args[2])}.get(cmd, lambda: sys.exit(f"unknown: {cmd}"))()
