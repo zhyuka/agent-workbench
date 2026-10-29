@@ -10,18 +10,30 @@ comments, a transcript paragraph, a commit, or a paragraph of a note. Flags work
 
 SOURCES (all by default; --source logs,git narrows)
   logs         every Claude Code log on this machine, on disk or inside a backup zip (cc_logs.py):
-               sessions, subagents, history.jsonl, VS Code chat, this session included. Every byte
-               of every distinct copy is scanned; each line that could match is decoded and matched
-               on its content, never on metadata such as cwd or file paths.
+               sessions, subagents, history.jsonl, VS Code chat, this session included. Read through
+               recall_index.py's index: each call first indexes what changed (up to CONFIG
+               index_budget; the rest is read whole that call while a background update catches up),
+               the index returns every record that could match, and each is decoded and matched here
+               on its content, never on metadata such as cwd or file paths, as when every byte was
+               read. A query the index cannot answer is read whole, and COVERAGE says why: an
+               alternative under 3 characters or over 200, one with a quote or backslash, or text
+               redaction rewrites (the index holds redacted text only). --scan reads every copy whole.
   git          commit messages on every branch of each clone, and `git log -S` on the diffs. The
                clones are recall.repos in kit_config; unset, the git repo you run in.
-  notes        md/txt/json under the notes folders (recall.notes, else seen_before.notes)
+  notes        md/txt/json under the notes folders (recall.notes, else seen_before.notes), and the
+               request ledger ledger.py writes (<ledger.dir>/requests.jsonl), one paragraph per request:
+               your words, its state, why and the session's title; the reply it was settled on is left
+               to the logs source
   memory       memory cards (~/.claude*/projects/*/memory, or --memory DIR), skills and CLAUDE.md files
   transcripts  meeting transcripts in recall.transcripts (else seen_before.transcripts): the cleaned
                .md by paragraph, a .txt only when it has no .md, with close spellings
   figma        OPTIONAL: every comment on the files in kit_config figma.files, resolved included,
                through figma_comments.py; a node id also finds threads pinned to an ancestor with an
-               offset inside that node. Needs FIGMA_TOKEN (environment or keychain).
+               offset inside that node. Also the words on each file's canvas (text, stickies, shapes,
+               table cells, code blocks; hidden layers skipped) from figma_family.py's whole-file
+               index: a board's is rebuilt once a day old, a design file's read as cached
+               (figma_family.py build <key> makes it). Words only, the file as it is now, so --since
+               and --before do not apply. Needs FIGMA_TOKEN (environment or keychain).
   ado          OPTIONAL: every work item in kit_config ado.org/ado.project, closed and removed
                included, with its comments, through ado_rest.py's cache; #N finds item N.
   A source with nothing configured prints NOT CONFIGURED with the key to set. That is not a search
@@ -31,6 +43,9 @@ SOURCES (all by default; --source logs,git narrows)
 kit_config keys read (all optional):
   recall.notes, recall.transcripts   a folder or a list of folders (else seen_before.notes/.transcripts)
   recall.repos                       a list of git clones to search
+  recall.index_dir                   the folder of the logs index (recall_index.py), default
+                                     ~/.cache/agent-workbench/recall_logs; keep it outside any synced folder
+  ledger.dir                         where ledger.py keeps requests.jsonl (notes and --brief read it)
   figma.files, ado.org, ado.project  turn the optional sources on
 
 HOW A CONCEPT MATCHES, strongest first; every hit names its form
@@ -60,7 +75,9 @@ SEALED  A folder under the notes folders that holds a `.recall-sealed` marker is
   rule, and log_extract.py uses it too.
 
 OUTPUT  SUMMARY first, then COVERAGE, then the hits, then RECAP. In the logs, sessions where you
-  typed the term come first, newest first. A SPLIT session holds every concept, never in one record.
+  typed the term come first, newest first. A prompt a script sent into a session (its turnOrigin set
+  and not "human") reads as "script: prompt", never as you, and so does its queued copy; a claude -p
+  capture's reads as "claude -p: prompt". A SPLIT session holds every concept, never in one record.
   Long token-like strings are redacted in everything printed; logs hold pasted credentials.
 
 EXIT  0 hits.  1 every source that is configured ran and nothing matched.  2 a source, or part of one,
@@ -78,7 +95,18 @@ DATES  --since and --before are UTC: --before 2026-01-05T15:39 means 15:39 UTC, 
   ado_asof_max_mb, the least recently used cutoff is dropped), and leaves out comments written after
   it. When that lookup cannot run, item fields are today's, COVERAGE says so, exit 2.
 
-  recall.py --last /rebase      every invocation of a command or skill, and the logs since the last
+  recall.py --brief <concept>   what to read before answering: your words on it from the request ledger
+                                (rulings first), the sessions live on it in the last 48 h with their task
+                                lists and recaps (and every other live one in a line), and notes and git.
+                                This session, headless runs, sealed logs and archived sessions are left
+                                out. With --before, as it stood then. Not Figma, ADO, transcripts or older
+                                logs. Exit 0 something to read, 1 nothing matched, 2 a part DID NOT RUN:
+                                with no request ledger (ledger.py writes it) or no notes folder set, that
+                                part says so and the exit is 2. Live sessions are found under
+                                <root>/.claude/projects; the desktop app's session files give titles and
+                                archived state, and its task-list and wrap-up tools give plans and recaps.
+  recall.py --last /rebase      every invocation of a command or skill, and the logs since the last;
+                                a prompt a script sent is not counted, nor is this session's own run
   recall.py --calibrate FILE    re-run a set of past misses and print N of M found; exit 1 on a miss
                                 in a source that ran, 2 when every miss is in a source that DID NOT RUN.
                                 FILE is JSON: [{"id", "terms": [...], "expect": [...], "before"}], each
@@ -91,7 +119,7 @@ ENCODING GUARD. A UnicodeEncodeError on a star or an arrow in a snippet would ex
   cannot happen.
 """
 import argparse, collections, datetime, difflib, glob, gzip, hashlib, io, json, os, re, subprocess, sys
-import tempfile, time, urllib.parse, zipfile
+import sqlite3, tempfile, time, urllib.parse, zipfile, zlib
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 try:
@@ -106,6 +134,7 @@ if TOOLS not in sys.path:
 import cc_logs  # noqa: E402
 import seals as sealing  # noqa: E402  the .recall-sealed rule, shared with log_extract.py
 import kit_config  # noqa: E402
+import recall_index  # noqa: E402  the logs source's index
 
 HOME = os.path.expanduser("~")
 SOURCES = ("logs", "figma", "ado", "transcripts", "git", "notes", "memory")
@@ -132,7 +161,13 @@ CONFIG = {
     "ado_asof_max_mb": 50,  # saved cutoffs past this are dropped, least recently used first
     "figma_files": None,    # {file key: (kind, name)}
     "figma_token": None,    # None: kit_config.token("FIGMA_TOKEN") decides whether figma can run
+    "figma_canvas": "auto",  # figma_family.load mode for a board's canvas text; a design file's is read as cached
+    "ledger": None,         # None: <ledger.dir>/requests.jsonl, where ledger.py writes it (notes and --brief)
+    "app_sessions": os.path.join(HOME, "Library", "Application Support", "Claude", "claude-code-sessions"),
     "workers": min(os.cpu_count() or 4, 12),
+    "index": recall_index.PATH,      # the logs index; None reads every copy whole on each call
+    "index_budget": 256 << 20,      # bytes of log one call indexes; past it, the rest are read whole this call
+    "index_spawn": True,            # ...and a background `recall_index.py update` catches up
 }
 MUT = set()  # selftest only: the rule being broken on purpose
 
@@ -150,6 +185,22 @@ def _setting(key):
 
 def notes_dirs():
     return CONFIG["notes_dirs"] if CONFIG["notes_dirs"] is not None else _setting("notes")
+
+
+def ledger_path():
+    """The request ledger, as ledger.py finds it: ledger.dir in kit_config, else its default folder."""
+    if CONFIG["ledger"] is not None:
+        return CONFIG["ledger"]
+    d = kit_config.get("ledger", "dir")
+    d = d if isinstance(d, str) and d.strip() else os.path.join(HOME, ".local", "share", "agent-workbench", "ledger")
+    return os.path.join(os.path.abspath(os.path.expanduser(d)), "requests.jsonl")
+
+
+def _note_files():
+    """The single files searched as notes: CONFIG notes_files, and the request ledger when there is one.
+    A .jsonl, so the walk's extensions never take it."""
+    led = ledger_path()
+    return list(CONFIG["notes_files"]) + ([led] if os.path.isfile(led) and led not in CONFIG["notes_files"] else [])
 
 
 def transcript_dirs():
@@ -171,7 +222,7 @@ def _off(name):
         return "set figma.files in kit_config to search Figma comments"
     if name == "ado" and not all(ado_target()):
         return "set ado.org and ado.project in kit_config to search ADO"
-    if name == "notes" and not notes_dirs() and not CONFIG["notes_files"]:
+    if name == "notes" and not notes_dirs() and not _note_files():
         return "set recall.notes in kit_config to a notes folder"
     if name == "transcripts" and not transcript_dirs():
         return "set recall.transcripts in kit_config to a transcripts folder"
@@ -472,6 +523,12 @@ def typed(rec):
     return content
 
 
+def scripted(rec):
+    """A prompt a script sent into a desktop session (a pre-review brief, a probe, a bench run): no origin
+    and turnOrigin "sdk". Your own turns there carry turnOrigin "human"; older logs carry none."""
+    return rec.get("turnOrigin") not in (None, "human")
+
+
 def _user_role(t):
     s = t.lstrip()[:400]
     # a subagent's hand-back is its final report, like a task notice; its progress notes stay peer messages
@@ -661,14 +718,19 @@ def _scan(data, kind, Q, r):
                 role, txt = "set aside", "\n".join(aside)
             if kind == "headless":       # a claude -p capture: its prompt came from a script, not from you
                 role = "claude -p: prompt" if role.startswith("you") else "claude -p: " + role
+            elif role.startswith("you") and scripted(rec):
+                role = "script: prompt"
             elif sub:
                 role = "agent: task" if role == "you" else "agent: " + role
-            rid = rec.get("uuid") or hashlib.sha1(line).hexdigest()
+            # A record with no uuid is named by its line as the index stores it, so a copy read whole and one
+            # read through the index fold into one hit.
+            rid = rec.get("uuid") or hashlib.sha1((recall_index.canonical(line, "no_redact" not in MUT)
+                                                   or (line,))[0]).hexdigest()
             h = {"q": qi, "id": rid, "sid": rec.get("sessionId") or rec.get("session_id") or "", "ts": ts or raw,
                  "role": role,
                  "forms": [b[1] for b in best], "rank": max(b[0] for b in best), "aside": side,
                  "excerpt": excerpt(txt, first[2])}
-            if role.startswith("you") or role in ONCE:
+            if role.startswith("you") or role in ONCE or role == "script: prompt":
                 h["typed"] = hashlib.sha1(" ".join(txt.split()).encode("utf-8", "replace")).hexdigest()[:16]
             r["hits"].append(h)
 
@@ -682,7 +744,8 @@ def _command(rec, name):
     content = (rec.get("message") or {}).get("content")
     if isinstance(content, list):
         content = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-    if t is None or rec.get("isSidechain") or not isinstance(content, str) or "<skill-format>" in content or \
+    if t is None or rec.get("isSidechain") or scripted(rec) or not isinstance(content, str) or \
+            "<skill-format>" in content or \
             not REMIND.sub("", content).lstrip().startswith(("<command-message>", "<command-name>")):
         return None
     return t if re.match(r"/?%s(?:\s|$)" % re.escape(name), t) else None
@@ -743,7 +806,8 @@ def _last_scan(data, kind, name, r):
         if not isinstance(rec, dict):
             continue
         ts, how = _ts(rec), None
-        content = (rec.get("message") or {}).get("content")
+        m = rec.get("message")
+        content = m.get("content") if isinstance(m, dict) else None     # a denied tool call writes a string
         if kind == "history":
             disp = rec.get("display") or ""
             if re.match(r"/%s(?:\s|$)" % re.escape(name), disp):
@@ -755,7 +819,10 @@ def _last_scan(data, kind, name, r):
                 r["auto"].append((ts, auto))
         elif rec.get("type") == "assistant" and isinstance(content, list):
             for b in content:
-                sk = (b.get("input") or {}).get("skill", "") if isinstance(b, dict) else ""
+                if not isinstance(b, dict):
+                    continue
+                inp = b.get("input")
+                sk = str(inp.get("skill", "")) if isinstance(inp, dict) else ""
                 if b.get("type") == "tool_use" and b.get("name") == "Skill" and sk.split(":")[-1] == name:
                     how = "Skill tool, args: " + str((b.get("input") or {}).get("args", ""))
             if how and ts and (kind in ("subagent", "headless") or rec.get("isSidechain")):  # listed apart, not counted
@@ -765,6 +832,17 @@ def _last_scan(data, kind, name, r):
             r["calls"].append((ts, how))
 
 
+SCAN_STOPPED = "scan stopped partway: "   # a record the scan did not expect names its copy; it never ends the run
+
+
+def _result(c, lines=0, error=None):
+    """A copy's result, as work() and work_index() fill it."""
+    return {"key": c.key, "kind": c.kind, "via": c.via, "where": cc_logs.where(c.path), "label": c.label(),
+            "live": os.sep + ".claude" + os.sep in c.path,
+            "path": c.path, "size": c.size, "lines": lines, "error": error, "hits": [], "seen": {}, "undated": {},
+            "meta": {}, "bad": 0, "calls": [], "auto": [], "sub": []}
+
+
 def work(spec, copies):
     """Process-pool entry point. copies: plain tuples of cc_logs.Copy fields. One result per copy."""
     sp, Q = _compiled(spec)
@@ -772,10 +850,7 @@ def work(spec, copies):
     try:
         for t in copies:
             c = cc_logs.Copy(*t)
-            r = {"key": c.key, "kind": c.kind, "via": c.via, "where": cc_logs.where(c.path), "label": c.label(),
-                 "live": os.sep + ".claude" + os.sep in c.path,
-                 "path": c.path, "size": c.size, "lines": 0, "error": None, "hits": [], "seen": {}, "undated": {},
-                 "meta": {}, "bad": 0, "calls": [], "auto": [], "sub": []}
+            r = _result(c)
             try:
                 if c.via == "disk":
                     with open(c.path, "rb") as fh:
@@ -801,10 +876,13 @@ def work(spec, copies):
                 out.append(r)
                 continue
             r["lines"] = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
-            if sp.get("mode") == "last":
-                _last_scan(data, c.kind, sp["name"], r)
-            else:
-                _scan(data, c.kind, Q, r)
+            try:
+                if sp.get("mode") == "last":
+                    _last_scan(data, c.kind, sp["name"], r)
+                else:
+                    _scan(data, c.kind, Q, r)
+            except Exception as e:  # a record the scan did not expect: name this copy and read the rest
+                r["error"] = f"{SCAN_STOPPED}{type(e).__name__}: {e}"[:200]
             out.append(r)
     finally:
         for z in zfs.values():
@@ -867,7 +945,9 @@ def _inventory(opts, seals=None):
 
 
 def _prefer(h):
-    return (0 if h["key"][:36] == h["sid"] else 1, 0 if h["via"] == "disk" else 1, 0 if h.get("live") else 1)
+    # The label last, so two copies that tie fold to the same one however the copies were read.
+    return (0 if h["key"][:36] == h["sid"] else 1, 0 if h["via"] == "disk" else 1, 0 if h.get("live") else 1,
+            h.get("label", ""))
 
 
 def _gaps(inv, failed):
@@ -876,11 +956,200 @@ def _gaps(inv, failed):
     gone = collections.Counter(r["path"] for r in failed if r["error"] == cc_logs.VANISHED)
     unread = inv.did_not_read + [(p, f"{cc_logs.VANISHED}; {n} cop{'y' if n == 1 else 'ies'} not read")
                                  for p, n in gone.items()]
-    return ([f"copy failed to open: {r['label']}: {r['error']}" for r in failed if r["path"] not in gone]
+    return ([f"copy {'not fully read' if r['error'].startswith(SCAN_STOPPED) else 'failed to open'}: {r['label']}: "
+             f"{r['error'].removeprefix(SCAN_STOPPED)}" for r in failed if r["path"] not in gone]
             + [f"{'zip' if p.lower().endswith('.zip') else 'log'} DID NOT READ: {p.replace(HOME, '~')}: {why}"
                for p, why in unread]
             + [f"folder {d.replace(HOME, '~')}" for d in inv.not_searched]
             + [f"folder could not be opened: {d.removeprefix('find: ').replace(HOME, '~')}" for d in inv.not_opened])
+
+
+# The words after which redact rewrites the value that follows (cc_logs.SECRET_CTX): text there is not in
+# the index, so an alternative holding one is read whole.
+CTX_KEY = re.compile("(?i)" + re.search(r"\(\?:[^)]*\)", cc_logs.SECRET_CTX.pattern).group(0))
+INDEX_BLIND = ("logs: through the index, text inside a string redaction rewrote is not found: a word of 32+ "
+               "characters such as a long mcp__ tool name, a long base64-like run, a token; --scan reads every copy "
+               "whole")
+
+
+def _index_expr(q):
+    """(the FTS lookup that returns every record q can match in, "") or (None, why the index cannot answer
+    q). Every concept goes in, ORed, so a record holding one concept is read too, as the scan reads it."""
+    out = []
+    for con in q["concepts"]:
+        for a in con["alts"]:
+            t = a["text"]
+            if len(t) > recall_index.MAX_ALT:
+                return None, f"{t[:40]!r}... is longer than {recall_index.MAX_ALT} characters"
+            if '"' in t or "\\" in t:
+                return None, f"{t!r} holds a quote or a backslash, which a log writes escaped"
+            if cc_logs.redact(t) != t or CTX_KEY.search(t):
+                return None, f"{t!r} is text redaction rewrites, and the index holds redacted text only"
+            if a["kind"] == "node":
+                sets = [re.findall(r"\d+", t)]
+            elif a["kind"] in ("ado", "digits"):
+                sets = [[a["id"]]]
+            else:   # exact and variant hold every part; near holds every word (_alt)
+                words = sorted({w.lower() for w in re.findall(r"\w+", t) if len(w) >= 3})
+                sets = [_parts(t)] + ([words] if a["near"] else [])
+            exprs = [recall_index.all_of(s) for s in sets]
+            if exprs[0] is None:
+                return None, f"{t!r} has no run of 3 characters to look up"
+            out += [e for e in exprs if e]
+    return (" OR ".join(dict.fromkeys(out)), "") if out else (None, "no concept to look up")
+
+
+def _spec(plain, keep=None):
+    """The scan's spec for the queries in plain, the ones not in keep blanked (no concept, so no hit)."""
+    qs = [p if keep is None or i in keep else {"labels": [], "since": None, "before": None} for i, p in enumerate(plain)]
+    return json.dumps({"mode": "search", "mut": sorted(MUT), "queries": qs})
+
+
+def _merge(results):
+    """One result per copy: a copy can be read through the index for some queries and whole for others."""
+    by = {}
+    for r in results:
+        m = by.setdefault(r["label"], r)
+        if m is r:
+            continue
+        m["hits"] += r["hits"]
+        for qi, s in r["seen"].items():
+            m["seen"].setdefault(qi, set()).update(s)
+        for f in ("undated", "meta"):
+            for qi, n in r[f].items():
+                m[f][qi] = m[f].get(qi, 0) + n
+        m["bad"] += r["bad"]
+        m["lines"] = max(m["lines"], r["lines"])
+        m["error"] = m["error"] or r["error"]
+    return list(by.values())
+
+
+def work_index(spec, items):
+    """Process-pool entry point for copies read through the index. items: (cc_logs.Copy fields, its line
+    count, its candidate records compressed, in log order). One result per copy, as work() makes."""
+    _, Q = _compiled(spec)
+    out = []
+    for t, n, zs in items:
+        c = cc_logs.Copy(*t)
+        r = _result(c, n)
+        if zs:
+            try:
+                _scan(b"\n".join(zlib.decompress(z) for z in zs), c.kind, Q, r)
+            except Exception as e:   # as in work(): name this copy and read the rest
+                r["error"] = f"{SCAN_STOPPED}{type(e).__name__}: {e}"[:200]
+        out.append(r)
+    return out
+
+
+def _pool_index(spec, items, serial=False, size=8 << 20):
+    """work_index over items: in this process for a few candidates, else in the pool, about 8 MB a task."""
+    total = sum(len(z) for _, _, zs in items for z in zs)
+    if serial or CONFIG["workers"] <= 1 or total <= 2 * size:
+        return work_index(spec, items)
+    tasks, cur, n = [], [], 0
+    for it in sorted(items, key=lambda it: -sum(len(z) for z in it[2])):
+        cur.append(it)
+        n += sum(len(z) for z in it[2])
+        if n >= size:
+            tasks.append(cur)
+            cur, n = [], 0
+    if cur:
+        tasks.append(cur)
+    import multiprocessing
+    with ProcessPoolExecutor(CONFIG["workers"], mp_context=multiprocessing.get_context("spawn")) as ex:
+        return [r for rs in ex.map(work_index, [spec] * len(tasks), tasks) for r in rs]
+
+
+def _logs_index(queries, plain, copies, inv, seals, opts):
+    """The queries the index answers, read through it. -> (results of the copies read through it, the copies
+    those queries still read whole, the query numbers answered, {qi or "all": COVERAGE lines}). A sealed log
+    is never written to the index, lifted seals included, and one a newer seal holds is deleted from it."""
+    path = CONFIG.get("index")
+    notes = collections.defaultdict(list)
+    if not path:
+        return [], [], set(), notes
+    if getattr(opts, "scan", False):
+        notes["all"].append("logs: --scan: every copy read whole, not through the index")
+        return [], [], set(), notes
+    exprs = {}
+    for qi, q in enumerate(queries):
+        e, why = _index_expr(q)
+        if e:
+            exprs[qi] = e
+        else:
+            notes[qi].append(f"logs: every copy read whole, not through the index: {why}")
+    if not exprs:
+        return [], [], set(), notes
+    t0, short = time.time(), path.replace(HOME, "~")
+    lock = recall_index.Lock(path)
+    try:
+        conn = recall_index.connect(path)
+    except recall_index.Unusable as e:
+        moved = ""
+        if lock.try_acquire():   # a cache: set it aside and build it again, unless a writer has it open
+            try:
+                for ext in ("", "-wal", "-shm"):
+                    if os.path.exists(path + ext):
+                        os.replace(path + ext, path + ".corrupt" + ext)
+                moved = f"; moved to {short}.corrupt, and a new one is built"
+            finally:
+                lock.release()
+            if CONFIG.get("index_spawn"):
+                recall_index.spawn_update(path)
+        notes["all"].append(f"logs: the index {short} could not be read, so every copy was read whole: "
+                            f"{_why(e)}{moved}")
+        return [], [], set(), notes
+    try:
+        held, held_keys = recall_index.sealed_keys(inv, conn, seals)
+        if "index_writes_sealed" in MUT:   # selftest: the rule broken on purpose
+            held, held_keys = [], set()
+        indexable = {recall_index.ident(c) for c in sealing.hold_logs(inv, copies, held)[0]}   # never a sealed log
+        todo = [c for c in copies if recall_index.ident(c) in indexable]
+        wrote, st = lock.try_acquire(), None
+        try:
+            if wrote:
+                recall_index.purge(conn, held_keys)
+                status, st = recall_index.sync(conn, todo, CONFIG["index_budget"], "no_redact" not in MUT,
+                                               1 if getattr(opts, "serial", False) else CONFIG["workers"])
+            else:   # another run is writing it: what it holds now is used, the rest is read whole
+                status, waiting = recall_index.plan(conn, todo)
+                status.update({recall_index.ident(w[0]): ("pending", None) for w in waiting})
+        finally:
+            lock.release()
+        conn.execute("begin")   # one snapshot for the copies and their records
+        have = recall_index.rows(conn)
+        results, direct, ok = [], [], {}
+        for c in copies:
+            k = recall_index.ident(c)
+            s = status.get(k, ("sealed", None))
+            if s[0] == "error":
+                results.append(_result(c, error=s[1]))
+            elif s[0] == "ok" and k in have:
+                ok[have[k]["id"]] = (c, have[k])
+            else:
+                direct.append(c)
+        got, nrec = recall_index.lookup(conn, list(exprs.values()), set(ok))
+        conn.execute("commit")
+        items = [(tuple(c), row["lines"], [z for _, z in got.get(cid, ())]) for cid, (c, row) in ok.items()]
+        results += _pool_index(_spec(plain, set(exprs)), items, getattr(opts, "serial", False))
+    except sqlite3.DatabaseError as e:
+        notes["all"].append(f"logs: the index {short} failed partway, so every copy was read whole: {_why(e)}")
+        return [], [], set(), notes
+    finally:
+        conn.close()
+    waiting = [c for c in direct if status.get(recall_index.ident(c), ("",))[0] == "pending"]
+    spawned = bool(waiting) and CONFIG.get("index_spawn") and recall_index.spawn_update(path)
+    line = (f"logs: index {short}: {len(ok)} of {len(copies)} copies read through it, {nrec:,} candidate records"
+            + (f"; {st['copies']} brought up to date ({st['bytes'] / 1e6:.0f} MB) in {st['seconds']:.1f}s" if st else
+               "; another run was updating it")
+            + (f"; {len(waiting)} not yet indexed ({sum(c.size for c in waiting) / 1e9:.2f} GB) read whole"
+               + (", and a background update is catching up" if spawned else "") if waiting else "")
+            + (f"; {len(direct) - len(waiting)} sealed cop{'y' if len(direct) - len(waiting) == 1 else 'ies'}"
+               f" read whole, never indexed" if len(direct) > len(waiting) else "")
+            + f"; {time.time() - t0:.1f}s")
+    for qi in exprs:
+        notes[qi] += [line, INDEX_BLIND]
+    return results, direct, set(exprs), notes
 
 
 def src_logs(queries, opts):
@@ -889,9 +1158,16 @@ def src_logs(queries, opts):
     inv, copies, (held, nomatch) = _inventory(opts, seals)
     lifted = {s["dir"] for s in seals if s["state"] == "lifted"}
     kept_out = sum(h.get("log copies", 0) for d, h in held.items() if d not in lifted)
-    spec = json.dumps({"mode": "search", "mut": sorted(MUT),
-                       "queries": [{k: q.get(k) for k in ("labels", "since", "before")} for q in queries]})
-    results = _pool(spec, copies, getattr(opts, "serial", False))
+    plain = [{k: q.get(k) for k in ("labels", "since", "before")} for q in queries]
+    serial = getattr(opts, "serial", False)
+    via_index, direct, answered, notes = _logs_index(queries, plain, copies, inv, seals, opts)
+    if answered:
+        rest = set(range(len(queries))) - answered
+        read = {r["label"] for r in via_index if not r["error"]}
+        results = _merge(via_index + (_pool(_spec(plain), direct, serial) if direct else [])
+                         + (_pool(_spec(plain, rest), [c for c in copies if c.label() in read], serial) if rest else []))
+    else:
+        results = _pool(_spec(plain), copies, serial)
     lines = sum(r["lines"] for r in results)
     failed = [r for r in results if r["error"]]
     partial = _gaps(inv, failed)
@@ -918,12 +1194,14 @@ def src_logs(queries, opts):
                 if h["id"] not in best or _prefer(h) < _prefer(best[h["id"]]):
                     best[h["id"]] = h
             hits = list(best.values())
-            typed_seen, keep = set(), []
+            typed_seen, keep = {}, []
             for h in sorted(hits, key=lambda h: h["ts"] or ""):
                 k = (skey(h["key"]), h.get("typed"))
                 if h.get("typed") and k in typed_seen:
+                    if h["role"] == "script: prompt":     # its queued copy reads as typed; the delivered one knows
+                        typed_seen[k]["role"] = h["role"]
                     continue
-                typed_seen.add(k)
+                typed_seen[k] = h
                 keep.append(h)
             hits = keep
         main = [h for h in hits if not h["aside"]]
@@ -937,6 +1215,7 @@ def src_logs(queries, opts):
                    f"{before_dedup - len(hits)} duplicate records (copies of one record) folded"
                    + (f"; {kept_out} sealed cop{'y' if kept_out == 1 else 'ies'} not read (the seal line above)"
                       if kept_out else ""))
+        cov += notes["all"] + notes[qi]
         if meta:
             cov.append(f"logs: {meta} line(s) matched only in metadata (cwd, paths, ids) and are not hits")
         if undated:
@@ -1102,9 +1381,53 @@ def src_figma(queries, opts):
                 if isinstance(e, KeyboardInterrupt):
                     raise
                 partial.append(f"figma {key}: node ancestry DID NOT RUN ({_why(e)}); offset pins not checked")
+    # The words on each canvas (SOURCES above). A design file's index is read as cached: rebuilding a large
+    # design file takes minutes and gigabytes. A board's is rebuilt once a day old (CONFIG figma_canvas).
+    canvas = {}
+    import figma_family
+    for key in data:
+        kind, name = files[key]
+        mode = CONFIG["figma_canvas"] if kind == "board" else "cache"
+        try:
+            ix, note = figma_family.load(key, mode=mode)
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            ix, note = None, _why(e)
+        if ix is not None and ix.text:
+            canvas[key] = ix
+            pages = {ix.idx[n][figma_family.PAGE] for n in ix.text if n in ix.idx}
+            cov.append(f"figma canvas: {name} ({key}): {len(ix.text):,} text layers on {len(pages)} pages, index "
+                       f"{ix.age_h():.0f} h old" + (f" ({note})" if note else "") + "; hidden layers skipped; the "
+                       "file as it is now, so --since and --before do not apply")
+        elif kind == "board":
+            partial.append(f"figma canvas {name} ({key}) DID NOT RUN: "
+                           + (note or "its index holds no text; python tools/figma_family.py build " + key))
+        else:
+            cov.append(f"figma canvas: {name} ({key}) not searched: "
+                       + (note or "its cached index predates text, which the next figma_family.py build adds"))
     out = []
     for q in queries:
         hits = []
+        for key, ix in canvas.items():
+            kind, name = files[key]
+            slug = re.sub(r"[^A-Za-z0-9]+", "-", name or "File").strip("-") or "File"
+            for nid, words in ix.text.items():
+                v = ix.idx.get(nid)
+                if not v or v[figma_family.HID]:
+                    continue
+                flat = " ".join(words.split())
+                best = [match_concept(con, flat) for con in q["concepts"]]
+                if all(best):
+                    where = " > ".join(ix.idx[c][figma_family.NAME].strip()[:50] for c in ix.chain(nid)[:-1]
+                                       if ix.idx[c][figma_family.T] in ("CANVAS", "SECTION"))
+                    # A table cell's id, T<table>;<row>;<column>, opens nothing in a link; link its table.
+                    at = nid.split(";")[0][1:] if nid.startswith("T") else nid
+                    hits.append({"ts": "", "form": "/".join(sorted({b[1] for b in best})),
+                                 "rank": max(b[0] for b in best), "open": False, "canvas": True,
+                                 "head": f"canvas  {where}  https://www.figma.com/{'board' if kind == 'board' else 'design'}"
+                                         f"/{key}/{slug}?node-id={at.replace(':', '-')}",
+                                 "excerpt": excerpt(flat, best[0][2], 200), "ids": [f"figma:{nid}"]})
         for key, cs in data.items():
             roots = {c["id"]: c for c in cs if not c.get("parent_id")}
             kids = collections.defaultdict(list)
@@ -1601,7 +1924,7 @@ def find_seals(opts):
                     notes.add(p)
     for s in seals:
         s.setdefault("notes", set())
-    for f in CONFIG["notes_files"]:
+    for f in _note_files():
         if os.path.isfile(f):
             s = sealing.sealed_at(f, seals)
             if s:
@@ -1643,6 +1966,21 @@ def _seal_lines(qr):
     return out
 
 
+def _ledger_paras(text):
+    """The request ledger: one paragraph per request, your words with its state, the session's title and
+    why. The reply it was settled on (ev) is left out: the logs source already searches that text."""
+    out = []
+    for i, ln in enumerate(text.splitlines(), 1):
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("text"):
+            out.append((i, f"{(r.get('ts') or '')[:16]} request, {r.get('state') or '?'}: \"{r['text']}\" "
+                           f"({r.get('title') or 'untitled session'}; {r.get('why') or 'no reason given'})"))
+    return out
+
+
 def _search_files(queries, files, label, ids_of, name):
     cov_big, recs, unread = [], [], []
     for p in files:
@@ -1657,7 +1995,8 @@ def _search_files(queries, files, label, ids_of, name):
             if not (isinstance(e, FileNotFoundError) and os.path.islink(p)):   # a link to nothing holds no text
                 unread.append(f"file DID NOT READ: {p.replace(HOME, '~')}: {cc_logs.why_unread(e)}")
             continue
-        recs.append((p, utc(mt), mt.astimezone().strftime("%Y-%m-%d"), _paragraphs(text, by_line=p.endswith(".json"))))
+        paras = _ledger_paras(text) if p.endswith(".jsonl") else _paragraphs(text, by_line=p.endswith(".json"))
+        recs.append((p, utc(mt), mt.astimezone().strftime("%Y-%m-%d"), paras))
     base = [f"{name}: {len(recs)} files, {sum(len(r[3]) for r in recs):,} paragraphs; searched as they are "
             f"today (a file has no history here, so --since filters by last modified)"
             + (f"; {len(unread)} could not be read" if unread else "")]
@@ -1690,7 +2029,7 @@ def _search_files(queries, files, label, ids_of, name):
 
 def src_notes(queries, opts):
     sealed = getattr(opts, "sealed", None)            # search() walked the notes folders once, finding seals
-    files = sealed["notes"] if sealed else _text_files(notes_dirs(), CONFIG["notes_files"])
+    files = sealed["notes"] if sealed else _text_files(notes_dirs(), _note_files())
     held = {s["dir"]: {"notes": len(s["notes"])} for s in _seals(opts) if s["state"] != "expired"}
     if not files:
         return [dict(r, sealed=held) for r in _dnr("no note files found", len(queries))]
@@ -1792,7 +2131,8 @@ def render(qr, opts, full=False):
                 s += f"; {len(r['aside'])} more only in reminders, tool-result copies or harness records" \
                      + ("" if opts.everything else " (--everything)")
         elif n == "figma":
-            s = f"{len(hs)} thread(s), {sum(1 for h in hs if h['open'])} open"
+            th = [h for h in hs if not h.get("canvas")]
+            s = f"{len(th)} thread(s), {sum(1 for h in th if h['open'])} open, {len(hs) - len(th)} canvas text layer(s)"
         else:
             s = f"{len(hs)} hit(s)" + (f", newest {hs[0]['ts'][:10]}" if hs and hs[0]["ts"] else "")
         L.append(f"  {n:12} {s}" + (f"   ⚠ PARTIAL: {len(r['partial'])} part(s) did not run" if r["partial"] else ""))
@@ -1928,8 +2268,12 @@ def cmd_last(name, opts):
                 print(f"\n  +{len(found)} {what}, not counted:")
                 show(found)
 
-    if not calls:
-        print(f"No invocation of /{name}.")
+    # The session asking is the pass now running, so its own call is not the last one: a /rebase run that
+    # counted itself would read "0 days ago" and almost no logs since.
+    me = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    mine = [k for k in calls if me and skey(calls[k][0]) == me]
+    if len(mine) == len(calls):
+        print(f"No invocation of /{name}" + (" before this session's own." if mine else "."))
         apart()
         for g in gaps:
             print(f"⚠ {g}")
@@ -1938,11 +2282,13 @@ def cmd_last(name, opts):
     print(f"/{name}: {len(calls)} invocation(s) on {len(days)} day(s), {days[0]} to {days[-1]} (UTC)\n")
     show(calls)
     apart()
-    ts = max(calls)
+    ts = max(k for k in calls if k not in mine)
     t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
     gap = (datetime.datetime.now(datetime.timezone.utc) - t).days
     print(f"\nLAST: {ts[:16]}Z ({t.astimezone().strftime('%m-%d %H:%M')} local) in {skey(calls[ts][0])[:8]}, "
           f"{gap} day(s) ago")
+    if mine:
+        print(f"  this session's own /{name} at {max(mine)[:16]}Z is not counted: it is the pass now running")
     since = []
     for c in copies:
         if c.via == "disk" and c.kind == "main":
@@ -2086,6 +2432,300 @@ def cmd_calibrate(path, opts):
     return 1 if seen_miss else 2
 
 
+# ----------------------------------------------------------------------------------------- --brief
+# What to read before answering, in one call: your own words on the topic, the sessions live on it with
+# their plans, and earlier work on disk. Most corrections to a session's own work trace to a frame too
+# small or a source not looked at, and the material for the better answer is often on disk already.
+
+BRIEF_HOURS = 48                             # a session is live when it wrote a record this recently
+BRIEF_WORDS = ("typed", "mid-turn", "card")  # your words; the ledger's "spawned" and "chip" texts are agents'
+BRIEF_SOURCES = ("notes", "git")
+PLAN_TOOL, WRAP_TOOL = "mcp__ccd_turn__update_plan", "mcp__ccd_turn__wrap_up"   # the desktop app's task list
+TS_RX = re.compile(r'"timestamp":\s*"([^"]+)"')
+
+
+def _clip(s, n):
+    s = " ".join((s or "").split())
+    s = s if len(s) <= n else s[:n - 1] + "…"
+    return s if "no_redact" in MUT else cc_logs.redact(s)
+
+
+def _brief_words(q, cut):
+    """(lines, matched count, problem): your typed messages and card answers in the request ledger that
+    match every concept, rulings first, then newest. Before a cutoff, only what you had said by then, and
+    no state, since the state is today's."""
+    path = ledger_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError as e:
+        return [], 0, f"DID NOT RUN: the request ledger {path.replace(HOME, '~')}: {_why(e)}"
+    got = []
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or r.get("source") not in BRIEF_WORDS:
+            continue
+        ts = utc(r.get("ts"))
+        if cut and "brief_no_cut" not in MUT and (not ts or ts >= cut):
+            continue
+        for k in ("text", "question", "answer"):     # a multi-select answer is a list
+            r[k] = r[k] if isinstance(r.get(k), str) else _join(r.get(k))
+        segs = [("you", r["text"])]
+        if r.get("source") == "card":
+            segs = [("card", r["question"]), ("you", r["answer"] or r["text"])]
+        if match_record(q, segs)[0]:
+            got.append((r.get("kind") == "decision" or r.get("state") == "ruled", ts, r))
+    got.sort(key=lambda g: (g[0], g[1]), reverse=True)
+    out = []
+    for ruled, ts, r in got[:12]:
+        tag = "ruling" if ruled else (r.get("kind") if cut else r.get("state")) or "?"
+        said = (f'card "{_clip(r.get("question"), 140)}" -> "{_clip(r.get("answer") or r.get("text"), 140)}"'
+                if r.get("source") == "card" else f'"{_clip(r.get("text"), 300)}"')
+        out.append(f"  {ts[:16].replace('T', ' ')}  {tag}  {said}  ({_clip(r.get('title') or 'untitled', 60)})")
+    if len(got) > 12:
+        out.append(f"  +{len(got) - 12} more: recall.py <the same concepts> --source notes")
+    return out, len(got), None
+
+
+def _plan(calls):
+    """The task list as the app shows it after these update_plan inputs: [[step, status]]."""
+    items = []
+    for c in calls:
+        if isinstance(c.get("items"), list):
+            items = [[str(i.get("content") or ""), i.get("status") or "pending"] for i in c["items"] if isinstance(i, dict)]
+            continue
+        if c.get("advance"):
+            for want, to in (("in_progress", "completed"), ("pending", "in_progress")):
+                step = next((i for i in items if i[1] == want), None)
+                if step:
+                    step[1] = to
+        for n in c.get("done") or ():
+            if isinstance(n, int) and 0 < n <= len(items):
+                items[n - 1][1] = "completed"
+        n = c.get("start")
+        if isinstance(n, int) and 0 < n <= len(items):
+            items[n - 1][1] = "in_progress"
+    return items
+
+
+def _brief_view(path, cut):
+    """One main log read up to the cutoff: its last record's time, entrypoint, title, your prompts, its task
+    list, its last wrap-up recap and last long message, and the files it edited, each with its time."""
+    v = {"last": "", "entry": "", "prompts": [], "recap": ("", ""), "report": ("", ""), "planned": "", "files": {}}
+    calls, titles = [], {}
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            rec = None
+            if any(k in line for k in ('"user"', '"assistant"', '"queued_command"', 'Title"')):
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    pass
+            if isinstance(rec, dict):   # its own time: the line can quote another record's
+                ts = utc(rec.get("timestamp"))
+            else:
+                m = TS_RX.search(line)
+                ts = utc(m.group(1)) if m else ""
+            if cut and ts and ts >= cut and "brief_no_cut" not in MUT:
+                continue
+            v["last"] = max(v["last"], ts)
+            if not isinstance(rec, dict) or rec.get("isSidechain"):
+                continue
+            v["entry"] = v["entry"] or rec.get("entrypoint") or ""
+            for k in ("customTitle", "aiTitle"):      # a title you set outranks the one the app made up
+                if rec.get(k):
+                    titles[k] = rec[k]
+            att = rec.get("attachment") if rec.get("type") == "attachment" else None
+            p = _join(att.get("prompt")) if isinstance(att, dict) and att.get("type") == "queued_command" else typed(rec)
+            if p and _user_role(p) == "you" and not scripted(rec) and not p.lstrip().startswith(("<bash-", "<scheduled-task")):
+                v["prompts"].append((ts, p))      # typed, or sent mid-turn; not a ! command or a scheduled run
+            for b in ((rec.get("message") or {}).get("content") or []) if rec.get("type") == "assistant" else ():
+                if not isinstance(b, dict):
+                    continue
+                inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                if b.get("name") == PLAN_TOOL:
+                    calls.append(inp)
+                    v["planned"] = ts
+                elif b.get("name") == WRAP_TOOL:
+                    v["recap"] = (ts, inp.get("recap") or "")
+                elif b.get("name") in ("Edit", "Write", "NotebookEdit") and inp.get("file_path"):
+                    v["files"][inp["file_path"].replace(HOME, "~")] = ts
+                elif b.get("type") == "text" and len(b.get("text") or "") >= 200:
+                    v["report"] = (ts, b["text"])      # its last long message: what it last told you
+    v["plan"], v["title"] = _plan(calls), titles.get("customTitle") or titles.get("aiTitle") or ""
+    return v
+
+
+def _app_sessions():
+    """{cli session id: {"id", "title", "archived"}} from the desktop app's session files; {} without the app."""
+    out = {}
+    for p in glob.glob(os.path.join(CONFIG["app_sessions"], "*", "*", "local_*.json")):
+        try:
+            with open(p, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and d.get("cliSessionId"):
+            out[d["cliSessionId"]] = {"id": d.get("sessionId") or "", "title": d.get("title") or "",
+                                      "archived": bool(d.get("isArchived"))}
+    return out
+
+
+def _brief_sealed(path, seals):
+    """A seal in force holds this log: one of its logs patterns names a component of the path, or the log
+    sits in its folder. _brief_live reads logs from disk, not through cc_logs, so it checks here."""
+    for s in seals:
+        if s["state"] in ("expired", "lifted"):
+            continue
+        if any(sealing.glob_rx(p).search(path) for p in s["logs"]) or sealing.sealed_at(path, [s]):
+            return True
+    return False
+
+
+def _brief_live(q, ref, cut, seals=()):
+    """(matched, also live, coverage, problem). A session is live when its main log wrote a record in the
+    BRIEF_HOURS before ref. This session (the desktop app's CLAUDE_CODE_HOST_SESSION_ID, or the CLI's
+    CLAUDE_CODE_SESSION_ID), headless runs, sealed logs and, today, archived sessions are left out; before a
+    cutoff an archived session counts, since it may have been live then."""
+    proj = os.path.join(CONFIG["root"], ".claude", "projects")
+    if not os.path.isdir(proj):
+        return [], [], "", f"DID NOT RUN: no session logs at {proj.replace(HOME, '~')}"
+    app = _app_sessions()
+    me = os.environ.get("CLAUDE_CODE_HOST_SESSION_ID") or ""
+    me_cli = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    lo_t = datetime.datetime.fromisoformat(ref.replace("Z", "+00:00")).timestamp() - BRIEF_HOURS * 3600
+    lo = utc(lo_t * 1000)
+    hit, other, read, left = [], [], 0, collections.Counter()
+    for path in glob.glob(os.path.join(proj, "*", "*.jsonl")):
+        sid = os.path.splitext(os.path.basename(path))[0]
+        a = app.get(sid) or {"id": "", "title": "", "archived": False}
+        try:
+            if os.path.getmtime(path) < lo_t:
+                continue
+            why = ("this session" if ((me and a["id"] == me) or (me_cli and sid == me_cli)) and "brief_no_self" not in MUT
+                   else "sealed" if "brief_no_seal" not in MUT and _brief_sealed(path, seals)
+                   else "archived" if a["archived"] and not cut else None)
+            v = None if why else _brief_view(path, cut)
+        except OSError:
+            why = "unreadable"
+        if why:
+            left[why] += 1
+            continue
+        read += 1
+        if not v["last"] or v["last"] < lo:
+            continue
+        if v["entry"].startswith("sdk"):
+            left["headless"] += 1
+            continue
+        title = a["title"] or v["title"] or "untitled"
+        segs = ([("title", title)] + [("you", p) for _, p in v["prompts"]] + [("plan", s) for s, _ in v["plan"]]
+                + [("recap", v["recap"][1]), ("report", v["report"][1])] + [("file", f) for f in v["files"]])
+        (hit if match_record(q, segs)[0] else other).append(dict(v, title=title, id=a["id"] or sid, archived=a["archived"]))
+    for xs in (hit, other):
+        xs.sort(key=lambda v: v["last"], reverse=True)
+    cov = (f"{read} log(s) written in the {BRIEF_HOURS} h before {ref[:16]}Z read"
+           + (f"; left out: {', '.join(f'{k} {n}' for k, n in sorted(left.items()))}" if left else ""))
+    return hit, other, cov, (f"{left['unreadable']} log(s) could not be read" if left["unreadable"] else None)
+
+
+def _stands(v):
+    """(when, text): the newer of its last wrap-up recap and its last long message."""
+    return max(v["recap"], v["report"])
+
+
+def _brief_session(q, v):
+    when = lambda ts: ts[5:16].replace("T", " ")
+    mark = {"completed": "[x]", "in_progress": "[>]"}
+    plan = "; ".join(f"{mark.get(st, '[ ]')} {s}" for s, st in v["plan"])
+    done = v["recap"][0] and v["recap"][0] >= v["planned"]
+    said = [p for p in v["prompts"] if any(match_concept(c, p[1]) for c in q["concepts"])] or v["prompts"]
+    out = [f"  {v['title']}  ({v['id'][:14]}{', archived since' if v['archived'] else ''}; last active "
+           f"{when(v['last'])}Z)"]
+    if v["plan"]:
+        out.append(f"    plan{' (wrapped up after it)' if done else ''}: {_clip(plan, 300)}")
+    ts, text = _stands(v)
+    if text:
+        out.append(f"    where it stands ({when(ts)}Z): {_clip(text, 260)}")
+    if v["files"]:
+        out.append("    files it edited: " + _clip(", ".join(sorted(v["files"], key=v["files"].get, reverse=True)[:6]), 260))
+    if said:
+        out.append(f"    you said ({when(said[-1][0])}Z): \"{_clip(said[-1][1], 220)}\"")
+    return out
+
+
+def _brief_earlier(labels, cut, opts):
+    """(lines, hit count, problem) from notes and git; before a cutoff, notes born after it are left out
+    and a note changed after it is marked, since notes have no history."""
+    o = argparse.Namespace(**dict(vars(opts), sources=BRIEF_SOURCES))
+    qr = search([{"labels": labels, "since": None, "before": cut}], o)[0]
+    out, n, bad, born = [], 0, [], 0
+    for name in BRIEF_SOURCES:
+        r = qr["src"][name]
+        if not r["ran"] or r["partial"]:
+            bad.append(f"{name}: {r['why'] or '; '.join(r['partial'])[:200]}")
+        keep = []
+        # docs before data, then the strongest match (exact before near), newest first within each
+        for h in sorted(r["hits"], key=lambda h: (h["head"].split(":")[0].endswith(".json"), h["rank"])):
+            p = next((os.path.expanduser(i[5:]) for i in h.get("ids") or () if i.startswith("file:")), "")
+            if p and (os.path.abspath(p) == os.path.abspath(ledger_path()) or f"{os.sep}.cache{os.sep}" in p):
+                continue
+            changed = ""
+            if p and cut:
+                st = os.stat(p) if os.path.exists(p) else None       # utc() reads a number as milliseconds
+                if st and "brief_no_cut" not in MUT and utc(getattr(st, "st_birthtime", st.st_mtime) * 1000) >= cut:
+                    born += 1
+                    continue
+                changed = "  (changed after the cutoff)" if st and utc(st.st_mtime * 1000) >= cut else ""
+            keep.append(h)
+            if len(keep) <= 8:
+                out += [f"  {name}  {h['head']}{changed}", f"      {h['excerpt']}"]
+        n += len(keep)
+        if len(keep) > 8:
+            out.append(f"  {name}: +{len(keep) - 8} more: recall.py <the same concepts> --source {name}")
+    if born:
+        out.append(f"  ({born} note(s) created after the cutoff left out)")
+    return out, n, "; ".join(bad) or None
+
+
+def cmd_brief(labels, opts):
+    """Print the brief; exit 0 something to read, 1 nothing matched, 2 a part DID NOT RUN."""
+    q = compile_query({"labels": labels, "before": opts.before})
+    cut = q["before"]
+    ref = cut or CONFIG.get("brief_now") or utc(datetime.datetime.now(datetime.timezone.utc))  # brief_now: selftest
+    words, nw, w_bad = _brief_words(q, cut)
+    try:                                    # before any log is read, as search() does
+        seals = find_seals(opts)["seals"]
+    except Exception as e:                  # unknown seals: listing live sessions could show a sealed one
+        seals = None
+        hit, other, cov, l_bad = [], [], "", f"DID NOT RUN: the seal check crashed: {_why(e)}"
+    if seals is not None:
+        hit, other, cov, l_bad = _brief_live(q, ref, cut, seals)
+    earlier, ne, e_bad = _brief_earlier(labels, cut, opts)
+    print(f"recall --brief  {' '.join(json.dumps(x, ensure_ascii=False) for x in labels)}  "
+          + (f"(as it stood before {cut[:16]}Z)" if cut else "(now)"))
+    print(f"YOUR WORDS  {nw} message(s) and card answer(s) in the request ledger match"
+          + (f"; {w_bad}" if w_bad else ""))
+    print("\n".join(words) or "  none")
+    print(f"LIVE SESSIONS  {len(hit)} match, {len(other)} other live; {cov}" + (f"; {l_bad}" if l_bad else ""))
+    for v in hit[:8]:
+        print("\n".join(_brief_session(q, v)))
+    for v in other[:12]:
+        now = (next((s for s, st in v["plan"] if st == "in_progress"), "") or _stands(v)[1]
+               or (v["prompts"] or [("", "")])[-1][1])
+        print(f"  also live: {v['title']} ({v['id'][:14]}): {_clip(now, 150)}")
+    print(f"EARLIER WORK  {ne} hit(s) in notes and git: docs before data, the strongest match first, then the newest"
+          + (f"; DID NOT RUN: {e_bad}" if e_bad else ""))
+    print("\n".join(earlier) or "  none")
+    print("NOT IN THIS BRIEF  Figma threads, ADO items, transcripts and logs older than "
+          f"{BRIEF_HOURS} h: run recall.py with the same concepts for those.")
+    if w_bad or l_bad or e_bad:
+        return 2
+    return 0 if nw or hit or ne else 1
+
+
 # -------------------------------------------------------------------------------------- --selftest
 
 STANDUP = "<command-message>standup</command-message>\n<command-name>/standup</command-name>"
@@ -2144,7 +2784,13 @@ def _plant(root):
                      "attachment": {"type": "queued_command", "commandMode": "prompt",
                                     "prompt": "<agent-message from=\"a1234567890abcdef\">\n[Subagent hand-back] guava "
                                               "finding\n</agent-message>"}}) + "\n").encode(),
+        # a prompt a script sent into a desktop session: queued with no origin, delivered with turnOrigin sdk
+        (json.dumps({"type": "queue-operation", "operation": "enqueue", "sessionId": u[0],
+                     "timestamp": "2026-09-15T10:00:06Z", "content": "tamarind brief from a script"}) + "\n").encode(),
+        rec(19, "user", "tamarind brief from a script", ts="2026-09-15T10:00:07.000Z", turnOrigin="sdk"),
         rec(15, "user", "<command-name>/rebase</command-name>\n<command-args>now</command-args>"),
+        rec(16, "user", "<command-name>/rebase</command-name>\n<command-args>a script</command-args>",
+            ts="2026-09-15T11:00:00.000Z", turnOrigin="sdk"),
         # --last /standup: typed twice a minute apart, and one Skill call, are 3; the rest only quote the tags.
         rec(20, "user", STANDUP, ts="2026-09-20T10:00:00.000Z"),
         rec(21, "user", STANDUP, ts="2026-09-20T10:01:00.000Z"),
@@ -2183,6 +2829,9 @@ def _plant(root):
         rec(39, "assistant", "", ts="2026-09-20T10:09:00.000Z", isSidechain=True, message={
             "role": "assistant", "content": [
                 {"type": "tool_use", "id": "t3", "name": "Skill", "input": {"skill": "standup", "args": "x"}}]}),
+        # A denied tool call writes its "message" as a string; one that quotes the name must not end --last.
+        rec(40, "system", "", ts="2026-09-20T10:09:30.000Z", subtype="permission_denied", tool_name="Bash",
+            message="Permission to use Bash has been denied. The command was /standup the list."),
     ])
 
     def w(rel, data):
@@ -2246,6 +2895,11 @@ def _plant(root):
     os.makedirs(os.path.join(root, "notes"))
     with open(os.path.join(root, "notes", "plan.md"), "w", encoding="utf-8") as fh:
         fh.write("# Plan\n\nRepo Enhancements spec from the platform lead.\n")
+    os.makedirs(os.path.join(root, "ledger"))
+    with open(os.path.join(root, "ledger", "requests.jsonl"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"id": "r1", "ts": "2026-10-20T10:00:00.000Z", "title": "Planted session", "state": "open",
+                             "why": "asked for later and nothing durable holds it", "text": "fix the planted ledger crossfade",
+                             "ev": {"reply": "ledgerevidenceonly"}}) + "\nnot json\n")
     # 2026-10-05 at 10:30 and 11:00:55 CDT: 15:30Z and 16:00:55Z, either side of a 15:39 UTC cutoff.
     tz_at = {"early": ("2026-10-05T10:30:00-05:00", 1791214200), "late": ("2026-10-05T11:00:55-05:00", 1791216055)}
     for word, (_, epoch) in tz_at.items():
@@ -2280,6 +2934,132 @@ def _plant(root):
     return u
 
 
+def selftest_brief():
+    """--brief on a planted tree, now and before a cutoff, then each of its rules broken on purpose."""
+    import contextlib
+    saved = dict(CONFIG)
+    env = {k: os.environ.get(k) for k in ("CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_SESSION_ID")}
+    ok = True
+    with tempfile.TemporaryDirectory(suffix=".d") as root:  # ".d": as in selftest
+        led, apps = os.path.join(root, "ledger", "requests.jsonl"), os.path.join(root, "app", "x", "y")
+        proj, notes, repo = os.path.join(root, ".claude", "projects", "p"), os.path.join(root, "notes"), os.path.join(root, "repo")
+        for d in (os.path.dirname(led), apps, proj, os.path.join(notes, ".cache"), repo):
+            os.makedirs(d)
+        rows = [("2026-10-20T10:00:00Z", "typed", "request", "done", {"text": "build the widget roster from the census"}),
+                ("2026-10-21T11:00:00Z", "card", "answer", "answered",
+                 {"question": "Which widget roster layout?", "answer": ["Two columns", "with photos"], "text": ""}),
+                ("2026-10-21T08:00:00Z", "typed", "request", "open", {"text": "fix the footer spacing"}),
+                ("2026-10-21T08:30:00Z", "spawned", "request", "done", {"text": "SPAWNED brief on the widget roster"}),
+                ("2026-10-19T09:00:00Z", "typed", "decision", "ruled", {"text": "RULING the widget roster stays one page"})]
+        with open(led, "w", encoding="utf-8") as fh:
+            fh.writelines(json.dumps(dict(r, ts=t, source=s, kind=k, state=st, title="Roster work")) + "\n" for t, s, k, st, r in rows)
+        for local, cli, title, arch in (("local_A", "A", "Roster redesign", False), ("local_B", "B", "Old roster", True),
+                                        ("local_C", "C", "Footer fix", False), ("local_S", "S", "This one", False)):
+            with open(os.path.join(apps, local + ".json"), "w", encoding="utf-8") as fh:
+                json.dump({"sessionId": local, "cliSessionId": cli, "title": title, "isArchived": arch}, fh)
+
+        def user(ts, text, entry="claude-desktop"):
+            return {"type": "user", "timestamp": ts, "entrypoint": entry, "message": {"role": "user", "content": text}}
+
+        def tool(ts, name, inp):
+            return {"type": "assistant", "timestamp": ts,
+                    "message": {"role": "assistant", "content": [{"type": "tool_use", "name": name, "input": inp}]}}
+        steps = [{"content": "Read the census", "status": "in_progress"}, {"content": "Draft the roster", "status": "pending"}]
+        logs = {"A": [user("2026-10-21T09:00:00Z", "rebuild the widget roster from the census"),
+                      tool("2026-10-21T09:05:00Z", PLAN_TOOL, {"items": steps}),
+                      tool("2026-10-21T09:06:00Z", PLAN_TOOL, {"advance": True}),
+                      tool("2026-10-21T09:30:00Z", "Write", {"file_path": os.path.join(notes, "roster-draft.md")}),
+                      tool("2026-10-21T12:00:00Z", WRAP_TOOL, {"recap": "ROSTER-RECAP the draft is written"}),
+                      {"type": "attachment", "timestamp": "2026-10-21T12:30:00Z",
+                       "attachment": {"type": "queued_command", "prompt": "MIDTURN also the widget roster legend"}}],
+                "B": [user("2026-10-21T09:10:00Z", "ARCHIVED widget roster, old version")],
+                "C": [user("2026-10-21T10:00:00Z", "fix the footer"),
+                      tool("2026-10-21T10:01:00Z", PLAN_TOOL, {"items": [{"content": "FOOTER-STEP", "status": "in_progress"}]})],
+                "S": [user("2026-10-21T09:10:00Z", "SELF widget roster")],
+                # this session as the CLI names it, with no desktop app file
+                "S2": [user("2026-10-21T09:12:00Z", "SELFCLI widget roster", entry="cli")],
+                "SEALD": [user("2026-10-21T09:11:00Z", "SEALEDLOG widget roster")],
+                "H": [user("2026-10-21T09:20:00Z", "HEADLESS widget roster grader", entry="sdk-cli")],
+                "OLD": [user("2026-10-10T09:00:00Z", "ANCIENT widget roster")]}
+        for cli, recs in logs.items():
+            with open(os.path.join(proj, cli + ".jsonl"), "w", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(r) + "\n" for r in recs)
+        os.makedirs(os.path.join(notes, "sealed"))
+        for path, text in ((os.path.join(notes, "sealed", SEAL),
+                            json.dumps({"reason": "t", "owner": "t", "until": "2099-01-01", "logs": ["SEALD"]})),
+                           (os.path.join(notes, "roster.md"), "# Roster\n\nNOTE the widget roster lives here.\n"),
+                           (os.path.join(notes, ".cache", "c.md"), "CACHED widget roster\n"),
+                           (os.path.join(repo, "r.txt"), "x\n")):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null",
+               "-c", "commit.gpgsign=false"]
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "Add the widget roster"]):
+            subprocess.run(git + args, check=True, capture_output=True)
+        CONFIG.update(root=root, ledger=led, app_sessions=os.path.join(root, "app"), notes_dirs=[notes], notes_files=[],
+                      repos=[repo], brief_now="2026-10-23T00:00:00.000Z")
+        os.environ["CLAUDE_CODE_HOST_SESSION_ID"] = "local_S"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "S2"
+        opts = argparse.Namespace(sources=SOURCES, everything=False, max=None, out=None, no_pull=True, refresh=False,
+                                  serial=True, include_sealed=False, before=None, memory=None, scan=False)
+
+        def brief(*labels, before=None):
+            opts.before, buf = before, io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = cmd_brief(list(labels), opts)
+            return code, buf.getvalue()
+
+        def checks():
+            c, now = brief("widget roster")
+            t, then = brief("widget roster", before="2026-10-21T09:15:00Z")
+            res = [("now: your typed words with their state, a card's list answer and a ruling, the ruling first; "
+                    "not a spawned brief or another topic",
+                    c == 0 and "  done  \"build the widget" in now and "with photos" in now and "SPAWNED" not in now
+                    and "footer spacing" not in now and now.find("RULING") < now.find("build the widget")),
+                   ("now: the live session on it with its task list as advanced, its recap, the file it wrote and your "
+                    "mid-turn message", "Roster redesign" in now and "[x] Read the census; [>] Draft the roster" in now
+                    and "ROSTER-RECAP" in now and "roster-draft.md" in now and "MIDTURN" in now),
+                   ("now: this session (by the desktop app's id or the CLI's), an archived one, a headless run, a sealed "
+                    "one and one quiet for 48 h left out; another live one in a line",
+                    not any(w in now for w in ("SELF", "ARCHIVED", "HEADLESS", "ANCIENT", "SEALEDLOG"))
+                    and "also live: Footer fix (local_C): FOOTER-STEP" in now),
+                   ("now: earlier work in notes and git, not the ledger again or a .cache folder",
+                    "NOTE the widget roster" in now and "Add the widget roster" in now and "CACHED" not in now
+                    and "requests.jsonl" not in now),
+                   ("before a cutoff: only what was said and done by then, no state, an archived session counts, a note "
+                    "and a commit made since left out", t == 0 and "  request  \"build the widget" in then
+                    and "with photos" not in then and "ROSTER-RECAP" not in then and "roster-draft.md" not in then
+                    and "[x] Read the census; [>] Draft the roster" in then and "ARCHIVED" in then
+                    and "Footer fix" not in then and "NOTE the widget" not in then and "1 note(s) created after" in then
+                    and "SEALEDLOG" not in then
+                    and "Add the widget roster" not in then)]
+            CONFIG["ledger"] = os.path.join(root, "gone.jsonl")
+            c, out = brief("widget roster")
+            res.append(("a ledger that cannot be read is exit 2 and says DID NOT RUN", c == 2 and "DID NOT RUN" in out))
+            CONFIG["ledger"] = led
+            c, out = brief("zebra quokka")
+            res.append(("nothing on the topic is exit 1, with the live sessions still listed", c == 1 and "also live" in out))
+            return res
+        for name, good in checks():
+            ok &= good
+            print(("pass " if good else "FAIL ") + "--brief " + name)
+        for m in ("brief_no_cut", "brief_no_self", "brief_no_seal"):
+            MUT.clear()
+            MUT.add(m)
+            failed = [n for n, g in checks() if not g]
+            ok &= bool(failed)
+            print(("pass " if failed else "FAIL ") + f"--brief mutation {m} is caught" + (f" by: {failed[0]}" if failed else ""))
+        MUT.clear()
+    CONFIG.clear()
+    CONFIG.update(saved)
+    for k, v in env.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    return ok
+
+
 def selftest():
     import types
     ok = True
@@ -2304,17 +3084,31 @@ def selftest():
     os.environ["TZ"] = "America/Chicago"  # the planted local times are CDT, -05:00, wherever this runs
     time.tzset()
 
-    with tempfile.TemporaryDirectory() as root:
+    # ".d" ends the random folder name: under the system temp dir a name with mixed case and digits can run on
+    # into a long path that cc_logs.redact() reads as a key, which hides the planted paths a check looks for.
+    with tempfile.TemporaryDirectory(suffix=".d") as root:
         u = _plant(root)
         CONFIG.update(root=root, cache=os.path.join(root, "cache.json"),
                       transcripts=[os.path.join(root, "transcripts")], repos=[os.path.join(root, "repo")],
                       notes_dirs=[os.path.join(root, "notes")], notes_files=[],
+                      ledger=os.path.join(root, "ledger", "requests.jsonl"),
                       memory_globs=[os.path.join(root, "mem", "projects", "*", "memory", "*.md")],
                       ado=("https://dev.azure.com/example", "Planted"),
                       ado_cache=os.path.join(root, "ado.json"), ado_pull=["false"],
-                      figma_files={K: ("design", "Planted file")}, figma_token="planted", workers=1)
+                      figma_files={K: ("design", "Planted file")}, figma_token="planted", workers=1,
+                      figma_canvas="cache", index=os.path.join(root, "index", "index.db"), index_spawn=False)
+        # figma_family's planted file under K, for the words on its canvas; its cache in the planted tree, and
+        # no way to Figma.
+        import figma_family
+        fam_saved = (figma_family.CACHE, figma_family._get)
+        figma_family.CACHE = os.path.join(root, "family")
+
+        def offline(*a, **k):
+            raise RuntimeError("selftest: no network")
+        figma_family._get = offline
+        figma_family.plant(K, figma_family._planted()[0])
         opts = argparse.Namespace(sources=SOURCES, everything=False, max=None, out=None, no_pull=True,
-                                  refresh=False, serial=True, include_sealed=False, memory=None)
+                                  refresh=False, serial=True, include_sealed=False, memory=None, scan=False)
         # #1162 as ADO held it at a past time: titled "Tabbed for now" and Active from its creation on 8/01.
         asof_dir, asof_calls = os.path.join(root, "asof"), []
 
@@ -2412,9 +3206,114 @@ def selftest():
             qr, _ = run("guava finding")
             check("a subagent's hand-back, queued and delivered, is one 'agent result', not a peer",
                   [h["role"] for h in logs(qr)] == ["agent result"])
+            qr, _ = run("tamarind brief")
+            check("a prompt a script sent into a desktop session, queued and delivered, is one 'script: prompt', "
+                  "not you", [h["role"] for h in logs(qr)] == ["script: prompt"])
             qr, _ = run("MobileCard")
             check("one record in three copies (live, archive, resumed zip) is one hit",
                   [h["id"] for h in logs(qr)].count("r2") == 1)
+            # The logs source reads through recall_index.py. Read whole (--scan), the same queries give the
+            # same hits; the index follows a log that grows, is rewritten, or ends mid-line.
+            def both(*qs):
+                """qs: (labels, since) pairs, searched in the logs at once through the index and read whole.
+                -> [(the two agree on hits, roles, forms and SPLIT, the result through the index, its text)]."""
+                Q = [{"labels": list(lb), "since": since, "before": None} for lb, since in qs]
+                was, opts.sources = opts.sources, ("logs",)
+                try:
+                    a = search(Q, opts)
+                    opts.scan = True
+                    b = search(Q, opts)
+                finally:
+                    opts.scan, opts.sources = False, was
+                hs = lambda qr: sorted((h["id"], h["role"], tuple(h["forms"]), h["key"], h["via"], h["aside"])
+                                       for h in logs(qr) + qr["src"]["logs"]["aside"])
+                out = []
+                for x, y in zip(a, b):
+                    tx, ty = "\n".join(render(x, opts, full=True)), "\n".join(render(y, opts, full=True))
+                    out.append((hs(x) == hs(y) and x["src"]["logs"]["split"] == y["src"]["logs"]["split"]
+                                and "copies read through it" in tx and "--scan: every copy read whole" in ty, x, tx))
+                return out
+            agree = both(*[((t,), None) for t in ("mobile card", "café→menu", "kiwi", "olive", "peach report",
+                                                  "guava finding", "tamarind brief", "MobileCard", "durian", "papaya",
+                                                  "lychee", "grape", "zebra", "3667:33839", "apple pie")],
+                         (("quokka", "wombat"), None), (("lemon",), "2026-09-01"))
+            check(f"{len(agree)} planted queries through the index and read whole (--scan) give the same hits, roles, "
+                  f"forms and SPLIT", all(g for g, _, _ in agree) and len(agree) == 17)
+            text = both((("→",), None))[0][2]
+            check("a term with no 3-character run is read whole, and COVERAGE says why",
+                  "every copy read whole, not through the index: '→' has no run of 3" in text)
+            live = os.path.join(CONFIG["root"], ".claude", "projects", "S", f"{u[0]}.jsonl")
+            with open(live, "rb") as fh:
+                orig = fh.read()                  # put back below, so each pass of these checks starts the same
+            with open(live, "ab") as fh:
+                fh.write(json.dumps({"type": "user", "uuid": "g1", "sessionId": u[0], "timestamp": "2026-09-17T00:00:00Z",
+                                     "message": {"role": "user", "content": "feijoa added later"}}).encode() + b"\n"
+                         + b'{"type":"user","uuid":"g2","sessionId":"' + u[0].encode()
+                         + b'","message":{"role":"user","content":"feijoa still bei')
+            conn = recall_index.connect(CONFIG["index"], create=False)
+            row0 = recall_index.rows(conn)[(live, "", "")]
+            conn.close()
+            qr, _ = run("feijoa")
+            conn = recall_index.connect(CONFIG["index"], create=False)
+            row1 = recall_index.rows(conn)[(live, "", "")]
+            conn.close()
+            check("a log that grew is read on from where the index stopped: its new record found, the line still "
+                  "being written held back", {h["id"] for h in logs(qr)} == {"g1"} and row1["id"] == row0["id"]
+                  and row1["done"] == row0["done"] + 1 and row1["offset"] > row0["offset"])
+            with open(live, "ab") as fh:
+                fh.write(b'ng written"}}\n')
+            qr, _ = run("feijoa")
+            check("the held line is found once it ends", {h["id"] for h in logs(qr)} == {"g1", "g2"})
+            with open(live, "rb") as fh:
+                whole = fh.read()
+            with open(live, "wb") as fh:          # rewritten: the first record changed, the file shorter
+                fh.write(whole.replace(b"please fix the mobile-card layout", b"please fix the guanabana", 1)
+                         .rsplit(b"\n", 3)[0] + b"\n")
+            qr, _ = run("guanabana")
+            qm, _ = run("feijoa")
+            check("a log rewritten shorter is read again whole: its changed record found, its cut ones gone",
+                  {h["id"] for h in logs(qr)} == {"r1"} and not {"g1", "g2"} & {h["id"] for h in logs(qm)})
+            with open(live, "wb") as fh:
+                fh.write(orig)
+            run("mobile card")
+            idx = CONFIG["index"]
+            with open(idx, "r+b") as fh:          # a corrupt index: recall sets it aside and reads every copy whole
+                fh.write(b"not a database" * 64)
+            for ext in ("-wal", "-shm"):
+                if os.path.exists(idx + ext):
+                    os.remove(idx + ext)
+            qr, text = run("mobile card")
+            check("a corrupt index is set aside and every copy read whole, and COVERAGE says so: the hits are the same",
+                  sorted(h["id"] for h in logs(qr)) == sorted(h["id"] for h in logs(agree[0][1]))
+                  and "could not be read, so every copy was read whole" in text and os.path.exists(idx + ".corrupt"))
+            qr, text = run("mobile card")
+            check("the next call builds a new index and reads through it", "copies read through it" in text
+                  and sorted(h["id"] for h in logs(qr)) == sorted(h["id"] for h in logs(agree[0][1])))
+
+            def in_index(*needles):
+                """The needles any stored record, FTS lookup or index file byte holds, and the stored copies' keys."""
+                got, conn = set(), recall_index.connect(CONFIG["index"], create=False)
+                try:
+                    for (z,) in conn.execute("select z from rec"):
+                        s = zlib.decompress(z)
+                        got |= {n for n in needles if n.encode() in s}
+                    for n in needles:
+                        e = recall_index.all_of([n])
+                        if e and conn.execute("select 1 from fts where fts match ? limit 1", (e,)).fetchone():
+                            got.add(n)
+                    keys = {k for (k,) in conn.execute("select key from copy")}
+                finally:
+                    conn.close()
+                for ext in ("", "-wal"):
+                    if os.path.exists(CONFIG["index"] + ext):
+                        with open(CONFIG["index"] + ext, "rb") as fh:
+                            data = fh.read()
+                        got |= {n for n in needles if n.encode() in data}
+                return got, keys
+            token = "ghp_" + "Ab1" * 12
+            got, _ = in_index(token, "apple pie token")
+            check("a planted token is in no stored record, FTS row or index file byte; its record is, redacted",
+                  got == {"apple pie token"})
             qr, _ = run("Kowalski")
             t = qr["src"]["transcripts"]["hits"]
             check("transcript fuzzy: Kowalsky found for Kowalski, labelled fuzzy", t and "fuzzy" in t[0]["form"])
@@ -2446,14 +3345,23 @@ def selftest():
             check("a thread pinned to a parent frame with its offset inside the node is found as 'offset on', one "
                   "outside it is not", [(h["ids"], h["form"]) for h in qr["src"]["figma"]["hits"]]
                   == [(["figma:2000000001"], "offset on 1:2")])
+            qr, text = run("planted build cost")
+            cv = [h for h in qr["src"]["figma"]["hits"] if h.get("canvas")]
+            check("canvas: words on two text layers (a label and its copy) are found, linked, and counted apart "
+                  "from threads", len(cv) == 2 and all("node-id=" in h["head"] and "$5.49" in h["excerpt"] for h in cv)
+                  and "2 canvas text layer(s)" in text)
+            qr, _ = run("zebra")
+            check("canvas: a word on no layer finds no canvas hit",
+                  not any(h.get("canvas") for h in qr["src"]["figma"]["hits"]))
 
             def boom(key):
                 raise RuntimeError("planted failure")
             qr, text = run("mobile card", fetch=boom)
             check("figma that cannot be read is DID NOT RUN, exit 2, other hits still printed",
                   exit_code(qr) == 2 and "DID NOT RUN" in text and logs(qr))
-            keep = {k: CONFIG[k] for k in ("figma_files", "ado", "notes_dirs", "transcripts", "figma_token")}
-            CONFIG.update(figma_files={}, ado=(None, None), notes_dirs=[], transcripts=[])
+            keep = {k: CONFIG[k] for k in ("figma_files", "ado", "notes_dirs", "transcripts", "figma_token", "ledger")}
+            CONFIG.update(figma_files={}, ado=(None, None), notes_dirs=[], transcripts=[],
+                          ledger=os.path.join(root, "no-ledger", "requests.jsonl"))
             try:
                 qr, text = run("xyzzy-not-planted")
             finally:
@@ -2553,6 +3461,12 @@ def selftest():
                   "each is NOT LIMITED by --before; without --before it says nothing",
                   qr["src"]["notes"]["hits"] and all(f"{n}: NOT LIMITED by --before" in text for n in ("notes", "memory"))
                   and "NOT LIMITED by --before" not in plain)
+            qr, _ = run("planted ledger crossfade")
+            check("the request ledger is searched, one paragraph per request with its state",
+                  [h["excerpt"].count("request, open") for h in qr["src"]["notes"]["hits"]] == [1])
+            qr, _ = run("ledgerevidenceonly")
+            check("a ledger request's settling reply is not searched there (the logs source has it)",
+                  not qr["src"]["notes"]["hits"])
             qr, _ = run("Zephyr")
             check("memory card, named memory:<stem>", ["memory:project_x" in h["ids"]
                                                        for h in qr["src"]["memory"]["hits"]] == [True])
@@ -2735,6 +3649,10 @@ def selftest():
                       "a seal is in force", hidden(qr, text) and "1 seal(s) in force" in text)
                 check("an unsealed sibling folder and subagent log are still found",
                       "open.md" in files and "q-open1-0" in ids)
+                sealed_key = f"{u[0]}/subagents/agent-sealed1.jsonl"
+                got, keys = in_index("quince sealed log", "quince open log")
+                check("a sealed log is never written to the index; an unsealed sibling is",
+                      got == {"quince open log"} and sealed_key not in keys)
                 check("an expired seal is ignored: its folder and log are found, and COVERAGE says it expired",
                       "old.md" in files and "q-old1-0" in ids
                       and "seal EXPIRED on 2020-01-01, ignored, so its folder and logs were searched as usual: "
@@ -2749,6 +3667,9 @@ def selftest():
                 finally:
                     opts.include_sealed = False
                 files, ids = found(qr)
+                got, keys = in_index("quince sealed log", "quince only in the backup")
+                check("--include-sealed reads the sealed log whole and still writes none of it to the index",
+                      not got and sealed_key not in keys)
                 check("--include-sealed finds the sealed folder's notes and both copies of the sealed log, and "
                       "COVERAGE says it was used", {"held.md", "more.md"} <= files
                       and {"q-sealed1-0", "q-sealed1-1"} <= ids and "searched anyway: 2 note files" in text
@@ -2759,6 +3680,12 @@ def selftest():
                       "(its log is found), and COVERAGE names the pattern that matched nothing",
                       not hidden(qr, text) and any(i.startswith("q-sealed1-") for i in found(qr)[1])
                       and "1 of 1 logs patterns matched no log copy: 'agent-sealed9'" in text)
+                was, _ = in_index("quince sealed log")
+                marker("exp-sealed", "2999-12-31", ["agent-sealed1"])           # sealed again: deleted from the index
+                qr, text = run("quince")
+                got, keys = in_index("quince sealed log", "quince only in the backup")
+                check("a log a new seal holds is deleted from the index at the next call, and not found",
+                      was == {"quince sealed log"} and not got and sealed_key not in keys and hidden(qr, text))
                 marker("exp-sealed", "", [], body="{not json")
                 qr, text = run("quince")
                 files, _ = found(qr)
@@ -2829,14 +3756,51 @@ def selftest():
             code = cmd_last("/rebase", opts)
         good = code == 0 and "2 invocation(s)" in buf.getvalue()
         ok &= good
-        print(("pass " if good else "FAIL ") + "--last finds the typed command and the history entry")
+        print(("pass " if good else "FAIL ") + "--last finds the typed command and the history entry; a scripted "
+              "one is not counted")
+        good = f"in {u[0][:8]}," in buf.getvalue().split("\nLAST: ")[-1].splitlines()[0]
+        was = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = u[0]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = cmd_last("/rebase", opts)
+        finally:
+            if was is None:
+                os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+            else:
+                os.environ["CLAUDE_CODE_SESSION_ID"] = was
+        last = buf.getvalue().split("\nLAST: ")[-1]
+        good = good and code == 0 and last.startswith("2025-09-15T10:01Z") and "is not counted" in last
+        ok &= good
+        print(("pass " if good else "FAIL ") + "--last from another session names that session's run; from the "
+              "session that ran it, the run before it, and says it left its own out")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             code = cmd_last("/standup", opts)
         good = code == 0 and "/standup: 3 invocation(s)" in buf.getvalue()
         ok &= good
         print(("pass " if good else "FAIL ") + "--last counts two typed runs a minute apart and a Skill call; a tool "
-              "result, summary, skill expansion, pasted quote or subagent record quoting the tags is not one")
+              "result, summary, skill expansion, pasted quote, subagent record or denied tool call quoting the tags "
+              "is not one")
+        scan0 = _last_scan
+
+        def stops(data, kind, name, r):
+            if b'"r40"' in data:
+                raise ValueError("planted")
+            scan0(data, kind, name, r)
+        globals()["_last_scan"] = stops
+        try:
+            sbuf = io.StringIO()
+            with contextlib.redirect_stdout(sbuf):
+                scode = cmd_last("/rebase", opts)
+        finally:
+            globals()["_last_scan"] = scan0
+        good = scode == 2 and "copy not fully read: " in sbuf.getvalue() and "ValueError: planted" in sbuf.getvalue() \
+            and "/rebase: 1 invocation(s)" in sbuf.getvalue()
+        ok &= good
+        print(("pass " if good else "FAIL ") + "--last: a log whose scan stops partway is named once and exits 2, "
+              "and the other logs are still read")
         out = buf.getvalue()
         good = "+3 load(s) by Claude Code itself, not counted" in out and "'autoload (ultra effort)'" in out \
             and "'autoload (workflow keyword)'" in out
@@ -2937,10 +3901,11 @@ def selftest():
               f"{[c for c, _ in got]}")
         # Mutations: break one rule at a time; at least one check must fail.
         for m in ("no_variants", "no_decode_path", "no_dedup", "no_zip", "meta_counts", "no_redact", "no_instance_id",
-                  "no_utc", "no_asof", "no_seal", "no_seal_notes", "no_seal_logs", "off_is_gap"):
+                  "no_utc", "no_asof", "no_seal", "no_seal_notes", "no_seal_logs", "off_is_gap", "index_writes_sealed"):
             MUT.clear()
             MUT.add(m)
             _CACHE.clear()
+            CONFIG["index"] = os.path.join(root, "index", f"{m}.db")   # each broken rule builds its own index
             failed = [n for n, g in checks() if not g]
             good = bool(failed)
             ok &= good
@@ -2949,6 +3914,7 @@ def selftest():
         _CACHE.clear()
     CONFIG.clear()
     CONFIG.update(saved)
+    figma_family.CACHE, figma_family._get = fam_saved
     for n, m in real_mods.items():
         if m is None:
             sys.modules.pop(n, None)
@@ -2959,13 +3925,33 @@ def selftest():
     else:
         os.environ["TZ"] = tz_saved
     time.tzset()
+
+    def parsed(*argv):
+        """parse(argv) as on the command line, or the error text it exits with."""
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                return parse(list(argv))
+        except SystemExit:
+            return err.getvalue()
+    for name, good in (("a flag glued to its value in one argument (\"--since 2026-10-03\") is refused, saying to split it",
+                        "its value as two words" in str(parsed("term", "--since 2026-10-03"))),
+                       ("a term that starts with -- but is not a recall flag (-- --no-verify) is searched",
+                        getattr(parsed("term", "--", "--no-verify"), "concepts", None) == ["term", "--no-verify"]),
+                       ("a flag and its value as two words set the filter (--since 2026-10-03)",
+                        getattr(parsed("term", "--since", "2026-10-03"), "since", None) == "2026-10-03")):
+        ok &= good
+        print(("pass " if good else "FAIL ") + "parse: " + name)
+    ok &= selftest_brief()
     print("ALL PASS" if ok else "SOME FAILED")
     return 0 if ok else 1
 
 
 # ------------------------------------------------------------------------------------------------- main
 
-def main():
+def parse(argv=None):
+    """The command line, refused with exit 2 as argparse refuses. A flag glued to its value in one argument
+    ("--since 2026-10-03") reads to argparse as a concept, and the filter would silently not apply."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("concepts", nargs="*", help="each one must match; | separates alternatives inside one")
     ap.add_argument("--source", help="comma list of " + ",".join(SOURCES) + " (default: all)")
@@ -2984,13 +3970,22 @@ def main():
     ap.add_argument("--no-pull", action="store_true", help="search the ADO cache as it is, even if stale")
     ap.add_argument("--refresh", action="store_true", help="re-read every zip listing and checksum")
     ap.add_argument("--serial", action="store_true", help="scan logs in this process (debugging)")
+    ap.add_argument("--scan", action="store_true", help="read every log copy whole instead of through the index "
+                                                       "(recall_index.py)")
     ap.add_argument("--last", metavar="COMMAND", help="every invocation of a command or skill, e.g. /rebase")
+    ap.add_argument("--brief", action="store_true", help="your words, the live sessions and earlier work on the "
+                                                         "concepts: what to read before answering")
     ap.add_argument("--calibrate", metavar="FILE",
                     help="run a past-miss set (JSON, see above) and print N of M expected answers found")
     ap.add_argument("--memory", metavar="DIR",
                     help="search this memory folder in place of every project's (e.g. ~/.claude/projects/<project>/memory)")
     ap.add_argument("--selftest", action="store_true")
-    a = ap.parse_intermixed_args()
+    a = ap.parse_intermixed_args(argv)
+    flags = {s for act in ap._actions for s in act.option_strings}
+    for c in a.concepts:
+        word = re.split(r"[\s=]", c.strip(), maxsplit=1)[0]
+        if word in flags and word != c.strip():  # a term after --, even "--no-verify" or "--since", is searched
+            ap.error(f"{c!r} is one argument, so {word} would not apply: pass the flag and its value as two words")
     a.sources = tuple(s.strip() for s in a.source.split(",")) if a.source else SOURCES
     bad = [s for s in a.sources if s not in SOURCES]
     if bad:
@@ -3003,14 +3998,21 @@ def main():
             _cut(getattr(a, flag))
         except ValueError as e:
             ap.error(f"--{flag}: {e}")
+    if not (a.concepts or a.selftest or a.last or a.calibrate):
+        ap.error("give at least one concept, or --last, --calibrate or --selftest")
+    return a
+
+
+def main():
+    a = parse()
     if a.selftest:
         return selftest()
     if a.last:
         return cmd_last(a.last, a)
     if a.calibrate:
         return cmd_calibrate(a.calibrate, a)
-    if not a.concepts:
-        ap.error("give at least one concept, or --last, --calibrate or --selftest")
+    if a.brief:
+        return cmd_brief(a.concepts, a)
     qr = search([{"labels": a.concepts, "since": a.since, "before": a.before}], a)[0]
     for line in render(qr, a):
         print(line)

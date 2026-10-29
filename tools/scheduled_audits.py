@@ -398,24 +398,18 @@ def open_requests_section(short, ledger_dir=None, limit=OPEN_SHOWN):
 
 
 def pushback_section(short, ledger_dir=None):
-    """The last 7 days of push-back counts, from pushback_score.py run on the ledger."""
+    """The last 7 days of push-back counts, from pushback_score.section() on the ledger. Its own lines say
+    "did not run" for a missing or unreadable ledger; this catches the rest."""
     d = ledger_dir or LEDGER_DIR
-    if d is None:
-        import ledger
-        d = ledger.LEDGER_DIR
-    path = os.path.join(d, "requests.jsonl")
-    script = os.path.join(TOOLS, "pushback_score.py")
-    if not os.path.isfile(script):
-        return ["- did not run (no pushback_score.py beside this tool)"]
     try:
-        p = subprocess.run([sys.executable, script, "--ledger", path, "--days", "7"], capture_output=True,
-                           text=True, timeout=300, errors="replace")
-    except (OSError, subprocess.TimeoutExpired) as e:
+        if d is None:
+            import ledger
+            d = ledger.LEDGER_DIR
+        sys.path.insert(0, TOOLS)
+        import pushback_score
+        return pushback_score.section(short, ledger=os.path.join(d, "requests.jsonl"))
+    except Exception as e:
         return [f"- did not run ({type(e).__name__})"]
-    if p.returncode != 0:
-        why = (p.stdout + p.stderr).strip().splitlines()
-        return [f"- did not run (exit {p.returncode}: {why[-1][:120] if why else 'no output'})"]
-    return [l if l.startswith(("-", " ")) else "- " + l for l in p.stdout.strip().splitlines()] or ["- nothing printed"]
 
 
 def digest(stamp, results, outputs, log, started):

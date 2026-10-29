@@ -12,7 +12,8 @@ WHY THIS EXISTS. A search that reads only ~/.claude/projects reads a fraction of
 have been archived, copied off another machine or backed up into zips; some exist only inside a zip.
 A search of two folders that prints "no hits" is reporting on part of the record and saying it is all.
 
-WHERE IT LOOKS. All of HOME (`logs.root` in kit_config, default ~), pruning node_modules and .git only.
+WHERE IT LOOKS. All of HOME (`logs.root` in kit_config, default ~), pruning only the folders named
+node_modules, .git, .venv and site-packages (see PRUNE; COVERAGE names them).
 `logs.backups` (optional, a list of folders) names where your backups sit; copies there are labelled
 "backup" in the coverage line. A backup folder must sit under the root to be walked.
 
@@ -33,8 +34,10 @@ Zips are listed member by member, and a zip inside a zip is opened too: backup l
 COPIES. The same log sits in several places (live folder, archive, backup zips). Copies with the same
 size and CRC-32 are one copy. Every copy that differs in either is read, because a resumed or
 compacted session can rewrite records. Readers dedup records by `uuid`. Disk checksums and zip
-listings are cached in ~/.cache/cc_logs_index.json against size and mtime: paths and numbers only,
-no log text. The first run reads every byte once; after that only changed files. The same file holds
+listings are cached in ~/.cache/cc_logs_index.json against size and mtime: paths, numbers and hashes,
+no log text. A disk entry holds the SHA-1 of the log's first and last 4 KB too, so a log that only
+grew (longer, those bytes unchanged) is checksummed on from where the last run stopped. The first
+run reads every byte once; after that only changed files. The same file holds
 the folder index (see _find): each folder's ctime, subfolders and log and zip names, so a run lists
 again only the folders that changed. A file a run did not reach (its folder not searched or not
 opened) keeps its cached entry while it exists: dropping it would make the next run, after one slow
@@ -82,7 +85,7 @@ clean answer.
 HELPERS for other tools: project_dir(cwd) is ~/.claude/projects/<the folder Claude Code keeps for
 cwd>; memory_dir(arg, cwd) is arg, else that folder's memory/.
 """
-import argparse, collections, contextlib, errno, io, json, os, re, struct, subprocess, sys, tempfile, time, zipfile, zlib
+import argparse, collections, contextlib, errno, hashlib, io, json, os, re, struct, subprocess, sys, tempfile, time, zipfile, zlib
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -101,6 +104,7 @@ SHAPES = (("vscode", re.compile(r"(?:^|/)(?:chatSessions|emptyWindowChatSessions
           ("subagent", re.compile(r"(?:^|/)(" + U + r"/subagents/.+\.jsonl)$")),
           ("main", re.compile(r"(?:^|/)(" + U + r"\.jsonl)$")),
           ("history", re.compile(r"(?:^|/)\.claude[^/]*/(history\.jsonl)$")))
+SHAPE_NEEDS = {"vscode": "hatSessions/", "subagent": "/subagents/", "main": ".jsonl", "history": "history.jsonl"}
 HEADLESS = "headless/"                    # key prefix of a claude -p capture (see the docstring)
 PREFER = {"disk": 0, "zip": 1, "nested": 2}
 
@@ -188,10 +192,11 @@ def memory_dir(arg=None, cwd=None):
 
 
 def shape(path):
-    """(kind, key) for a log path, or None."""
+    """(kind, key) for a log path, or None. A shape's search runs only on a path holding the text every match
+    of it holds (SHAPE_NEEDS), which cuts the cost several times over on tens of thousands of paths."""
     path = path.replace("\\", "/")
     for kind, rx in SHAPES:
-        m = rx.search(path)
+        m = SHAPE_NEEDS[kind] in path and rx.search(path)
         if m:
             return kind, ("vscode/" if kind == "vscode" else "") + m.group(1)
     return None
@@ -250,11 +255,40 @@ def _headless(p, old, new):
 
 
 def _crc_file(path):
+    """(CRC-32 of the whole file, its marks)."""
     crc = 0
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             crc = zlib.crc32(chunk, crc)
-    return crc
+        return crc, _marks(fh, fh.tell())
+
+
+MARK = 4096   # bytes hashed at a log's start and before its end, so a log that only grew is told from one rewritten
+
+
+def _marks(fh, size):
+    """The SHA-1 of a file's first MARK bytes and of the MARK bytes before byte size, as hex."""
+    n = min(MARK, size)
+    fh.seek(0)
+    head = fh.read(n)
+    fh.seek(size - n)
+    return hashlib.sha1(head).hexdigest() + hashlib.sha1(fh.read(n)).hexdigest()
+
+
+def _crc_grown(path, hit, size):
+    """(CRC-32 of the file, its marks) read on from where the cached entry hit stopped, when the file only
+    grew since: longer, and its first and last MARK bytes then unchanged. Else None, and it is read whole.
+    Without this, a live session log is read whole on every run."""
+    if not hit or len(hit) < 4 or not hit[3] or size <= hit[0]:
+        return None
+    with open(path, "rb") as fh:
+        if _marks(fh, hit[0]) != hit[3]:
+            return None
+        crc = hit[2]
+        fh.seek(hit[0])
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            crc = zlib.crc32(chunk, crc)
+        return crc, _marks(fh, fh.tell())
 
 
 LOCAL, CENTRAL, DESCRIPTOR, END = b"PK\x03\x04", b"PK\x01\x02", b"PK\x07\x08", b"PK\x05\x06"
@@ -431,10 +465,14 @@ def _walk_zip(path):
     return out, nested, bad, {"walked": walked, "at": off, "size": size, "cut": cut, "unknown": unknown}
 
 
-PRUNE = ("node_modules", ".git")
+PRUNE = ("node_modules", ".git", ".venv", "site-packages")   # folder names never walked: package trees and git
+# internals, where no tool writes a log. In a home with Python environments, .venv and site-packages can hold
+# nearly half the folders a walk visits and no log or zip. The folder index records the list, so a cache walked
+# under another one is not used.
 
 
 FIND_TIMEOUT = 30
+EACH_TICK, EACH_RATE = 0.05, 20_000   # _each adds a thread when a tick takes fewer folders than this rate
 FIND_RERUNS = 3   # a piece whose find quits is run again, alone, up to this many times
 FIND_QUIT = ("find: fts_read:", "find: ftsopen:")   # find's own walk failed and it quit, naming no folder
 DIR_SLACK_NS = 1_000_000_000   # a folder whose ctime is within this of the walk's start is re-listed next run
@@ -468,7 +506,7 @@ def _find_one(root):
     such as one denied subfolder, is not a quit: find goes on past it. That folder was still not
     read, so it makes both exit 2 too, unless it ends in GONE; see Inventory._went_away."""
     try:
-        r = subprocess.run(["/usr/bin/find", root, "(", "-name", PRUNE[0], "-o", "-name", PRUNE[1], ")", "-prune",
+        r = subprocess.run(["/usr/bin/find", root, "(", *[a for n in PRUNE for a in ("-o", "-name", n)][1:], ")", "-prune",
                             "-o", "-type", "d", "-print0",
                             "-o", "-type", "f", "(", "-name", "*.jsonl", "-o", "-iname", "*.zip", ")", "-print0"],
                            capture_output=True,
@@ -516,29 +554,38 @@ def _finds(pieces):
 
 
 def _each(folders, fn):
-    """{folder: fn(folder), or the OSError it raised}, 16 threads taking folders from one queue, for at most
-    FIND_TIMEOUT. A folder still unanswered then is left out; one held up holds only itself, as each thread
-    takes the next folder when it is free. The threads are daemons, so one that macOS holds for a prompt
-    cannot hold the process at exit."""
+    """{folder: fn(folder), or the OSError it raised}, for at most FIND_TIMEOUT. One thread takes folders
+    from a queue, and another starts, up to 16, each EACH_TICK the work goes slower than EACH_RATE a
+    second: a folder held up, or a disk not in cache. So one held up holds up only itself. 16 threads from
+    the start spend more time trading the interpreter lock than in lstat, several times what one thread
+    takes on a warm disk. A folder still unanswered then is left out. The threads are daemons, so one
+    that macOS holds for a prompt cannot hold the process at exit."""
     import threading
-    todo, lock, out = iter(list(folders)), threading.Lock(), {}
+    todo, lock, out, taken, drained = iter(list(folders)), threading.Lock(), {}, [0], [False]
 
     def run():
         while True:
             with lock:
                 d = next(todo, None)
+                taken[0] += 1
+                drained[0] = drained[0] or d is None
             if d is None:
                 return
             try:
                 out[d] = fn(d)
             except OSError as e:
                 out[d] = e
-    threads = [threading.Thread(target=run, daemon=True) for _ in range(16)]
-    for t in threads:
-        t.start()
-    end = time.monotonic() + FIND_TIMEOUT
-    for t in threads:
-        t.join(max(0.0, end - time.monotonic()))
+    threads, end, last = [], time.monotonic() + FIND_TIMEOUT, -1
+    while True:
+        live, wait = [t for t in threads if t.is_alive()], end - time.monotonic()
+        if wait <= 0 or (drained[0] and not live):
+            break
+        if not drained[0] and len(threads) < 16 and taken[0] - last < EACH_RATE * EACH_TICK:
+            threads.append(threading.Thread(target=run, daemon=True))
+            threads[-1].start()
+            live.append(threads[-1])
+        last = taken[0]
+        live[0].join(min(EACH_TICK, wait))
     return dict(out)
 
 
@@ -668,16 +715,19 @@ def _ancestors(d, root):
 
 
 def _dirs_out(dirs, root, full_at):
-    """The folder index as the cache holds it: paths relative to root, and when every folder was last walked."""
+    """The folder index as the cache holds it: paths relative to root, when every folder was last walked, and
+    the PRUNE list it was walked under."""
     n = len(root.rstrip(os.sep)) + 1
-    return {"root": root, "full_at": full_at, "dirs": {("" if d == root else d[n:]): e for d, e in dirs.items()}}
+    return {"root": root, "full_at": full_at, "prune": list(PRUNE),
+            "dirs": {("" if d == root else d[n:]): e for d, e in dirs.items()}}
 
 
 def _dirs_in(cache, root):
-    """The last run's folder index, if it walked this root and its last full walk is under FULL_WALK_EVERY
-    old; else None."""
+    """The last run's folder index, if it walked this root under this PRUNE list and its last full walk is
+    under FULL_WALK_EVERY old; else None. A folder's cached listing leaves out what was pruned, so an index
+    walked under another list would never reach a name taken off it."""
     w = cache.get("walk") or {}
-    if w.get("root") != root or not isinstance(w.get("dirs"), dict) \
+    if w.get("root") != root or not isinstance(w.get("dirs"), dict) or w.get("prune") != list(PRUNE) \
             or not time.time() - w.get("full_at", 0) < FULL_WALK_EVERY:
         return None
     base = root.rstrip(os.sep) + os.sep
@@ -721,8 +771,9 @@ def _find_changed(root, index, t0):
                 new.append(d)
             continue
         dirs[d] = e
-        paths += [os.path.join(d, f) for f in e[2]]
-        todo += [os.path.join(d, s) for s in e[1]]
+        pre = d if d.endswith(os.sep) else d + os.sep  # os.path.join's answer, at a tenth of its cost
+        paths += [pre + f for f in e[2]]
+        todo += [pre + s for s in e[1]]
     got, reruns = _finds(new)
     walked = {}
     for d in new:
@@ -763,8 +814,9 @@ class Inventory:
         new["walk"] = _dirs_out(dirs, root, full_at)
         self.not_searched = [d for d in self.denied if "NOT SEARCHED" in d]   # find gave up on these
         self.not_opened = [d for d in self.denied if "NOT SEARCHED" not in d and not d.endswith(GONE)]
+        base = root.rstrip(os.sep) + os.sep
         for p in paths:
-            rel = os.path.relpath(p, root)
+            rel = p[len(base):] if p.startswith(base) else os.path.relpath(p, root)
             if p.lower().endswith(".zip"):
                 if rel.startswith(MIRROR):
                     self.zips["mirror"] += 1
@@ -774,9 +826,7 @@ class Inventory:
                     continue
                 sig = [st.st_size, st.st_mtime_ns]
                 hit = old.get("zip", {}).get(p)
-                unsigned = hit and len(hit) == 7 and "signed" not in hit[5] \
-                    and str(hit[5].get("unknown")).startswith("no local header at byte 0")   # an older cache format
-                if hit and hit[:2] == sig and isinstance(hit[4], list) and not unsigned:  # a bare count: an older cache format
+                if hit and hit[:2] == sig and isinstance(hit[4], list):  # a bare count: an older cache format
                     entry = hit
                 elif _cloud_only(st):                      # listing it would download it: what it holds is unknown
                     self.cloud.add(p)
@@ -849,18 +899,18 @@ class Inventory:
             if _cloud_only(st):
                 self.cloud.add(p)
             if hit and hit[:2] == sig:
-                crc = hit[2]
+                crc, mark = hit[2], (hit[3] if len(hit) > 3 else None)
             elif p in self.cloud:
-                crc = None                                 # never read a placeholder; no checksum says what it holds
+                crc = mark = None                          # never read a placeholder; no checksum says what it holds
             else:
                 self.reread += 1
                 try:
-                    crc = _crc_file(p)
+                    crc, mark = _crc_grown(p, hit, st.st_size) or _crc_file(p)
                 except OSError as e:
                     self.did_not_read.append((p, why_unread(e)))
                     continue
             if crc is not None:
-                new["disk"][p] = sig + [crc]
+                new["disk"][p] = sig + [crc, mark]
             self.logs[got[1]].append(Copy(got[0], got[1], st.st_size, crc, "disk", p, None, None))
         for p, members, walk, why, broken in walks:
             held, missing = 0, []
@@ -966,7 +1016,7 @@ class Inventory:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.cache_path), suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(data, fh)
+                fh.write(json.dumps(data))             # json.dump encodes in Python; dumps in C, several times faster
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, self.cache_path)
@@ -1020,7 +1070,8 @@ class Inventory:
                  *runs_line,
                  f"  inventory {self.seconds:.1f}s, {self.reread} files re-read, {self.walked};"
                  f" {len(self.denied)} folders could not be"
-                 f" opened ({sum(1 for d in self.denied if '/Library/' in d)} of them macOS-protected Library folders)"]
+                 f" opened ({sum(1 for d in self.denied if '/Library/' in d)} of them macOS-protected Library folders)",
+                 f"  NOT WALKED, ON PURPOSE: folders named {', '.join(PRUNE)} (installed packages and git internals)"]
         for p, why in self.unreadable:
             lines.append(f"  UNREADABLE, SKIPPED {p.replace(HOME, '~')}: {why}")
         if self.not_zip:
@@ -1316,18 +1367,6 @@ def selftest():
         check("a cache entry holding a bare count of nested failures is re-listed, not trusted",
               old.reread == len(data["zip"]) and old.did_not_read == inv.did_not_read
               and sorted(old.not_zip) == sorted(inv.not_zip))
-        loose = os.path.join(root, "Downloads", "__MACOSX", "._loose.zip")
-        with open(cache, encoding="utf-8") as fh:
-            data = json.load(fh)
-        e = data["zip"][loose]                                                 # a failed walk, as an older cache held it
-        data["zip"][loose] = e[:2] + [[], 0, [], {"walked": 0, "at": 0, "size": e[0], "cut": None,
-                                                  "unknown": "no local header at byte 0"}, "BadZipFile"]
-        with open(cache, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-        mig = [Inventory(root, cache=cache) for _ in range(2)]
-        check("a loose not-a-zip cached as a failed walk by an older cache is re-read once, then served from the cache",
-              [i.reread for i in mig] == [1, 0] and not any(p == loose for i in mig for p, _ in i.did_not_read)
-              and all(sum("._loose.zip" in ln and "NOT A ZIP" in ln for ln in i.coverage()) == 1 for i in mig))
         check("a find that returns leaves no folder NOT SEARCHED or not opened",
               inv.not_searched == [] and inv.not_opened == [])
         held = os.path.join(root, "Library", "Containers")
@@ -1580,6 +1619,94 @@ def selftest():
         check("placeholder: coverage names them on one DID NOT READ line, and the inventory counts it as a gap",
               sum("DID NOT READ" in ln and "cloud placeholder" in ln for ln in ev.coverage()) == 1
               and sum("cloud placeholder" in w for _, w in ev.did_not_read) == 1)
+
+    # PRUNE: a folder by one of those names is never walked, by the root listing, a piece's find, a folder
+    # listed again or a new folder's find; an index walked under another prune list is not used.
+    with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as aside:
+        cache = os.path.join(aside, "cache.json")
+        names = iter("%08x-0000-4000-8000-%012x.jsonl" % (i, i) for i in range(50, 90))
+        copies = lambda i: sorted(c.path for cs in i.logs.values() for c in cs)
+
+        def put(*rel):
+            p = os.path.join(root, *rel, next(names))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as fh:
+                fh.write(b'{"uuid": "p", "type": "user", "message": {"content": "x"}}\n')
+            return p
+        kept = [put("proj"), put("Desktop", "proj")]
+        for n in PRUNE:
+            put(n)                                     # in the root listing
+            put("proj", n, "lib")                      # in a piece's find
+            put("Desktop", "proj", n)                  # in a find under Desktop
+        walked = Inventory(root, cache=cache)
+        time.sleep(DIR_SLACK_NS / 1e9 + 0.1)
+        Inventory(root, cache=cache)
+        kept.append(put("proj"))                       # proj is listed again
+        for n in PRUNE:
+            put("proj", n, "more")
+            put("new", n)                              # new is walked by its own find
+        kept.append(put("new"))
+        again = Inventory(root, cache=cache)
+        check("PRUNE: no log under a pruned folder name is found, by the full walk or by the index",
+              copies(walked) == sorted(kept[:2]) and copies(again) == sorted(kept)
+              and not again.walked.startswith("walked"))
+        with open(cache, encoding="utf-8") as fh:
+            c = json.load(fh)
+        c["walk"]["prune"] = ["node_modules"]
+        with open(cache, "w", encoding="utf-8") as fh:
+            json.dump(c, fh)
+        check("PRUNE: an index walked under another prune list is not used: the run walks every folder",
+              Inventory(root, cache=cache).walked.startswith("walked"))
+
+    # A log that only grew is checksummed on from where the last run stopped; one rewritten too is read whole.
+    with tempfile.TemporaryDirectory() as root:
+        key = "%08x-0000-4000-8000-%012x.jsonl" % (9, 9)
+        p = os.path.join(root, ".claude", "projects", "S", key)
+        os.makedirs(os.path.dirname(p))
+        line = lambda n: (json.dumps({"uuid": f"g{n}", "type": "user", "message": {"content": "y" * 300}}) + "\n").encode()
+        caches = iter(range(100))
+
+        def grow(n, change=None):
+            """(the inventory's CRC, the file's CRC, read whole) after a log of n records grows by 5, its byte
+            change first set to x. Each call starts from a cache of its own."""
+            cache, whole, real = os.path.join(root, f"grow{next(caches)}.json"), [], _crc_file
+            with open(p, "wb") as fh:
+                fh.write(b"".join(line(i) for i in range(n)))
+            Inventory(root, cache=cache)
+            with open(p, "r+b") as fh:
+                if change is not None:
+                    fh.seek(change)
+                    fh.write(b"x")
+                fh.seek(0, 2)
+                fh.write(b"".join(line(i) for i in range(n, n + 5)))
+            globals()["_crc_file"] = lambda q: (whole.append(q), real(q))[1]
+            try:
+                got = Inventory(root, cache=cache).logs[key][0].crc
+            finally:
+                globals()["_crc_file"] = real
+            with open(p, "rb") as fh:
+                return got, zlib.crc32(fh.read()), bool(whole)
+
+        size = len(b"".join(line(i) for i in range(40)))                    # about 13 KB, over two MARKs
+        check("a grown log is checksummed on from the last run, not read whole, to the whole file's CRC",
+              all(g == t and not w for g, t, w in (grow(40), grow(2))))
+        check("a grown log whose first or last MARK bytes changed too is read whole, to the right CRC",
+              all(g == t and w for g, t, w in (grow(40, 10), grow(40, size - 100))))
+        real = _crc_grown
+
+        def unmarked(path, hit, size):
+            """_crc_grown handed the file's own marks, so it trusts any growth."""
+            if not hit or len(hit) < 4:
+                return None
+            with open(path, "rb") as fh:
+                mark = _marks(fh, hit[0])
+            return real(path, hit[:3] + [mark], size)
+        globals()["_crc_grown"] = unmarked
+        try:
+            caught = [g != t for g, t, w in (grow(40, 10), grow(40, size - 100))]
+        finally:
+            globals()["_crc_grown"] = real
+        check("mutation: trusting growth without the marks is caught (head and tail changes)", caught == [True, True])
 
     # The folder index: with the last run's index, a run lists again only the folders whose ctime moved.
     with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as aside:

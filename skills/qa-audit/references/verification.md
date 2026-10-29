@@ -82,7 +82,7 @@ mean-pixel diff.
 - Whenever a container gains `opacity`, `filter`, `transform` or a stretched `::after`, check what it
   contains and render both states side by side: walk the live tree from every `backdrop-filter`
   element up its ancestors for a computed opacity below 1, and run an `elementFromPoint` occlusion
-  test at each one's centre.
+  test at each one's centre. `python tools/backdrop_group_check.py <url>` does both.
 
 **Asset currency.** The designer keeps working. Re-pull the design before auditing fidelity.
 
@@ -208,7 +208,8 @@ count over built CSS reads 0. Parse the built CSS to count media-gated rules.
 - **Disabling the GPU drops paint** on translucent and `backdrop-filter` surfaces, so text over a
   dark translucent band can read as an empty box. Before "fixing" invisible text there, read
   `innerText` and the computed colour, and confirm the box auto-sized. Use a GPU-on capture for any
-  visual judgement.
+  visual judgement:
+  `python tools/shot_gpu.py <url> <width> <out.png> [hoverSelector] [clipSelector]`.
 - **Other render artifacts not to mis-file:** `body { min-height: 100vh }` in an over-tall screenshot
   window pins the footer and shows a dark gap. An image source several times its rendered size can
   stall decoding and look like an element that doesn't render; compare the file's pixel size with its

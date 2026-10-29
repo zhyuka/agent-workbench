@@ -25,15 +25,16 @@ Tokens never go in these files. `FIGMA_TOKEN`, `ADO_PAT` and the like come from 
 | `figma.mirror` | figma_client | `{"<file key>": ["<page name>", ...]}` to keep a local REST mirror; off until set |
 | `figma.drafts` | drafts_store, figma_post | path of a drafts file of Figma comments (or `$FIGMA_DRAFTS`) |
 | `recall.notes`, `recall.transcripts`, `recall.repos` | recall | folders searched as your notes and meeting transcripts; git clones to search (default: the repo you run in). `seen_before.notes` / `.transcripts` / `.site` are read as fallbacks |
+| `recall.index_dir` | recall, recall_index | folder of the logs index (default `~/.cache/agent-workbench/recall_logs`); keep it outside any folder a cloud drive or mirror job copies |
 | `logs.root`, `logs.backups` | cc_logs and the tools built on it | where to walk for Claude Code logs (default `~`); backup folders whose copies count as backups |
-| `session_close.drafts` | session_close | a drafts file whose open entries count as left open |
+| `session_close.drafts` | session_close | file names or path endings that count as drafts files; listed, never blocking, and a promise naming one has a home |
 | `skill_lint.topics`, `skill_lint.startup_max` | skill_lint | facts with one owning file; the word budget for what loads at startup |
 | `skill_use.rules`, `skill_use.aliases` | skill_use | which skill must load before which risky step |
 | `tool_time.tools` | tool_time | extra folders of tools to time |
 | `agent_gate.suites` | agent_gate_stale | folder of eval suites |
 | `metrics.*` (`log_roots`, `project_folders`, `skip_folders`, `repo`, `branch`, `ticket_re`, `check_dir`, `tsv`) | weekly_metrics | inputs of the weekly process measures |
 | `doclint.*` (`scope`, `names`, `names_file`, `people_glob`, `people_prefix`, `people_file`, `exempt_names`, `exempt_parts`) | doclint | which docs it reads and the people's names it refuses |
-| `ledger.*` (`dir`, `rulings`, `rulings_also`, `ado_cache`, `skip_cwd`, `skip_first`, ...) | ledger, digest | where the request ledger lives and what else it reads |
+| `ledger.*` (`dir`, `rulings`, `rulings_also`, `ado_cache`, `skip_cwd`, `skip_first`, ...) | ledger, digest, recall (`ledger.dir`) | where the request ledger lives and what else it reads |
 | `transcripts.*` (`dir`, `aliases`, `aliases_file`, `ambiguous`) | transcript_check | the transcripts folder and the spellings of your product names |
 | `workspace.*` (`root`, `not_ours`, `docs`, `map`, `skip`, `ado_docs`, ...) | workspace_audit, archive, upkeep, desktop_mirror | your working folder and what in it the audits judge |
 | `backup.folder` | backup_cc_logs, desktop_mirror, upkeep | a folder a cloud drive syncs, or an external disk |

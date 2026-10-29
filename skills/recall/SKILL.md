@@ -18,6 +18,11 @@ Sources that read a remote service (design comments, a tracker) run only when co
 that source prints DID NOT RUN. A full search can take a minute or two,
 so background it when the next step doesn't depend on it.
 
+Before answering on a topic, run `--brief "<topic>"` first. It returns the user's own words on it
+from the request ledger, the live sessions working on it with their plans, and matching notes and
+git. It skips design comments, the tracker, transcripts and older logs, so run the full search when
+those could hold the answer.
+
 ## Query
 
 Each argument is one concept, and all concepts must match the same record. Inside a concept, `|`

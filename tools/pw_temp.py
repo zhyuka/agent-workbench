@@ -36,7 +36,7 @@ import os, re, shutil, subprocess, sys, tempfile, threading, time
 PREFIX = "pw-run-"   # pw-run-<pid>-<random>; the random part stops `pkill -f pw-run-123` matching pw-run-1234
 # Every folder named <prefix><pid>-: this module's, plus any other tool's that names its browser
 # folders the same way (add its prefix here).
-PREFIXES = (PREFIX, "edge-run-")
+PREFIXES = (PREFIX, "edge-run-", "gpushot-")
 MIN_AGE = 1800   # a second guard for a live run
 # Names Playwright and Chrome for Testing give their temp items, with no pid in them. Only `reap`
 # with legacy_age touches these, after checking that no running process names the folder.
