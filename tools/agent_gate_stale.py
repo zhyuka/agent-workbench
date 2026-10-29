@@ -2,7 +2,7 @@
 """agent_gate_stale.py - list each gated agent or skill whose last passing eval no longer matches what runs.
 
     python tools/agent_gate_stale.py [--suites DIR] [--project DIR]   one line per unit; exit 1 when any needs a re-run
-    python tools/agent_gate_stale.py --selftest                       planted units: current, edited, model moved, none
+    python tools/agent_gate_stale.py --selftest                       planted units: current, edited, model moved, none, gaps, accepted
 
 WHY. A unit (an agent or a skill) is gated once by its eval suite. The result goes stale when the
 unit's file changes or the model behind it moves. Agent files often say `model: opus`, an alias, so a
@@ -12,20 +12,36 @@ remembering.
 
 WHERE THE SUITES ARE. --suites DIR, else the config key agent_gate.suites (kit_config.py). With
 neither, it stops with exit 2 and names the key. Each suite is one folder under it, holding:
-  unit.json       {"unit": "cold-reader", "file": "~/.claude/agents/cold-reader.md", "run": "<command>"}
-  receipts.jsonl  one line per gate run: {"date", "unit_sha", "model", "pass", "summary", "failed": [...]}
+  unit.json       {"unit": "cold-reader", "file": "~/.claude/agents/cold-reader.md", "run": "<command>",
+                   "suite": [<the files that define its cases and checks>],                 (optional)
+                   "accepted": {"sha": "<unit sha>", "date": "<date>", "by": "<who>"}}       (optional)
+  receipts.jsonl  one line per gate run: {"date", "unit_sha", "model", "pass", "summary", "failed": [...],
+                   "gaps": [...], "suite_sha"}
 The suite itself (whatever "run" names, e.g. a `claude plugin eval` suite) writes the receipts; this
 tool only reads them. The unit's sha is sha1 of its file, first 7 hex digits; a skill is a folder, and
-every file in it counts (see file_sha), so a suite runner must stamp receipts with the same hash.
+every file in it counts (see file_sha), so a suite runner must stamp receipts with the same hash, and
+suite_sha with suite_sha() over the files "suite" names.
+
+THE STATES. The newest receipt for the unit's (sha, model) pair decides: a pass is CURRENT, a fail
+FAILED, which a person reads and nothing re-runs. STALE is the one state a re-run clears: no receipt,
+a suite file changed after it (so a check edited after a fail can't pass clean), or a receipt with
+gaps (a case not run, a run unscored), where no verdict was read. So one change costs at most one
+run, however many days it stays red. A skill folder no suite names is UNTESTED, since a skill is live
+the moment its folder exists, commit or not. A unit is ACCEPTED while its file keeps the sha its
+unit.json "accepted" names, whatever its receipts say: a person accepts a skill without a suite, or
+as its suite measured it. Once the file changes, one without a suite is UNTESTED and one with a suite
+is judged by its receipts again.
 
 THE LIVE MODEL. A full model id in the unit's frontmatter is the answer. Otherwise the model of that
 agent type's newest launch in the project's session logs (--project, default the current project's
 folder under ~/.claude/projects), else the most common id of its family across the newest main logs.
 
+BLIND TO. A change in the settings or environment a suite runs in: only the unit's file, the model
+and the suite's own files stale a receipt.
+
 It reads only; it runs no suite and spends nothing. Running a stale suite is a separate step.
-Exit 0 when every unit has a passing receipt for its current file and the live model; 1 when any
-doesn't, or a skill no suite names exists; 2 when it can't tell (no suites folder set, no session
-log, an unreadable suite).
+Exit 0 when every unit is CURRENT or ACCEPTED; 1 when any is STALE, FAILED or UNTESTED; 2 when it
+can't tell (no suites folder set, no session log, an unreadable suite).
 """
 import argparse
 import collections
@@ -55,6 +71,22 @@ def default_skills():
     .claude/skills loads only when work enters that repo, which is run from there."""
     root = os.environ.get('CLAUDE_PROJECT_DIR') or os.getcwd()
     return (os.path.join(os.path.expanduser('~'), '.claude', 'skills'), os.path.join(root, '.claude', 'skills'))
+
+
+def suite_sha(paths):
+    """sha1, first 7 hex digits, over a suite's own files (cases, checks, harness), each by its path as
+    written in unit.json. None when the unit names none."""
+    if not paths:
+        return None
+    h = hashlib.sha1()
+    for rel in paths:
+        p = os.path.expanduser(rel)
+        h.update(rel.encode('utf-8') + b'\0')
+        if os.path.exists(p):
+            with open(p, 'rb') as f:
+                h.update(f.read())
+        h.update(b'\0')
+    return h.hexdigest()[:7]
 
 
 def file_sha(path):
@@ -150,14 +182,10 @@ def live_model(unit=None, alias='opus', logs=None, sessions=60, mains=30):
 
 
 def check(suites, model_of=None, skills=None, logs=None):
-    """[(unit, status, detail)]; status is current, stale, failed, untested or unknown.
-
-    Each (file sha, model) pair is judged by its own receipts: a pass is CURRENT; a fail is FAILED,
-    which a person reads, and nothing re-runs; no receipt is STALE, the only state a re-run clears.
-    So one change costs at most one run, however many days it stays red. A skill folder that no
-    unit names is UNTESTED: a skill is live the moment its folder exists, commit or not, so a commit
-    hook alone can't keep an untested one out. `skills` is one folder or several; a skill outside the
-    first is named with its folder."""
+    """[(unit, status, detail)], one per unit; status is current, stale, failed, untested, accepted or
+    unknown, by the states the module docstring names. A commit hook alone can't keep an untested
+    skill out, so it is listed here. `skills` is one folder or several; a skill outside the first is
+    named with its folder."""
     model_of = model_of or (lambda unit: live_model(unit['unit'], frontmatter_model(unit['file']), logs=logs))
     skills = default_skills() if skills is None else skills
     rows = []
@@ -179,11 +207,21 @@ def check(suites, model_of=None, skills=None, logs=None):
         try:
             unit = json.load(open(unit_json, encoding='utf-8'))
             sha = file_sha(unit['file'])
-            model = model_of(unit)
+            acc = unit.get('accepted')
+            model = None if acc and not unit.get('suite') else model_of(unit)
         except (OSError, ValueError, KeyError) as e:
             rows.append((os.path.basename(folder), 'unknown', f'unreadable: {e}'))
             continue
         name, run = unit['unit'], unit.get('run', '?')
+        if acc and (acc.get('sha') == sha or not unit.get('suite')):
+            if acc.get('sha') == sha:
+                how, then = ('as its suite measured it', 'STALE') if unit.get('suite') else ('without a suite', 'UNTESTED')
+                rows.append((name, 'accepted', f'{sha} accepted {how} on {acc.get("date")} '
+                                               f'({acc.get("by", "?")}); a change to the file makes it {then}'))
+            else:
+                rows.append((name, 'untested', f'accepted at {acc.get("sha")}, now {sha}: it needs a suite or a new '
+                                               f'acceptance'))
+            continue
         if not model:
             rows.append((name, 'unknown', 'no session log names the model it runs on'))
             continue
@@ -192,11 +230,19 @@ def check(suites, model_of=None, skills=None, logs=None):
         if os.path.exists(path):
             receipts = [json.loads(l) for l in open(path, encoding='utf-8') if l.strip()]
         pair = [r for r in receipts if r.get('unit_sha') == sha and r.get('model') == model]
-        if any(r.get('pass') for r in pair):
-            r = [r for r in pair if r.get('pass')][-1]
+        ssha = suite_sha(unit.get('suite'))
+        r = pair[-1] if pair else None
+        after = ' after a FAIL; a person reads that change before a re-run counts' if r and not r.get('pass') else ''
+        gaps = (r.get('gaps') or []) if r else []
+        if r and ssha and r.get('suite_sha') != ssha:
+            rows.append((name, 'stale', f'{sha} on {model}: the suite\'s cases or checks changed since the receipt of '
+                                        f'{r.get("date")}{after}; run: {run}'))
+        elif gaps:
+            rows.append((name, 'stale', f'{sha} on {model}: the receipt of {r.get("date")} has a gap, so no verdict '
+                                        f'was read ({"; ".join(gaps)}); run: {run}'))
+        elif r and r.get('pass'):
             rows.append((name, 'current', f'{sha} passed on {r.get("date")} with {model}: {r.get("summary", "")}'))
-        elif pair:
-            r = pair[-1]
+        elif r:
             rows.append((name, 'failed', f'{sha} on {model} failed on {r.get("date")} ({", ".join(r.get("failed", []))}); '
                                          f'a person decides; nothing re-runs it'))
         else:
@@ -249,6 +295,25 @@ def selftest():
         with open(os.path.join(tmp, 'suites', 'failed', 'receipts.jsonl'), 'w') as f:
             f.write(json.dumps({'unit_sha': failed, 'model': 'm1', 'pass': False, 'date': 'd'}) + '\n')
         unit('none', 'E', [])
+        # The newest receipt for the pair decides: a fail after a pass is FAILED, a pass after a fail CURRENT.
+        nf = unit('newest-fail', 'F', [])
+        with open(os.path.join(tmp, 'suites', 'newest-fail', 'receipts.jsonl'), 'w') as f:
+            f.write(json.dumps({'unit_sha': nf, 'model': 'm1', 'pass': True, 'date': 'd1'}) + '\n')
+            f.write(json.dumps({'unit_sha': nf, 'model': 'm1', 'pass': False, 'date': 'd2'}) + '\n')
+        np_ = unit('newest-pass', 'G', [])
+        with open(os.path.join(tmp, 'suites', 'newest-pass', 'receipts.jsonl'), 'w') as f:
+            f.write(json.dumps({'unit_sha': np_, 'model': 'm1', 'pass': False, 'date': 'd1'}) + '\n')
+            f.write(json.dumps({'unit_sha': np_, 'model': 'm1', 'pass': True, 'date': 'd2'}) + '\n')
+        # A unit that names its suite files: a receipt holds for the checks it ran under, not edited ones.
+        cases_py = os.path.join(tmp, 'cases.py')
+        open(cases_py, 'w').write('checks v1')
+        for name, ok_ in (('suite-pass', True), ('suite-fail', False)):
+            sha_ = unit(name, 'H' + name, [])
+            uj = os.path.join(tmp, 'suites', name, 'unit.json')
+            json.dump({**json.load(open(uj)), 'suite': [cases_py]}, open(uj, 'w'))
+            with open(os.path.join(tmp, 'suites', name, 'receipts.jsonl'), 'w') as f:
+                f.write(json.dumps({'unit_sha': sha_, 'model': 'm1', 'pass': ok_, 'date': 'd',
+                                    'suite_sha': suite_sha([cases_py])}) + '\n')
         # A skill is a folder: its receipt is for the whole folder, and an edit to a reference stales it.
         # A shared folder it names (no SKILL.md of its own) counts too. A skill no suite names is UNTESTED.
         skills = os.path.join(tmp, 'skills')
@@ -267,6 +332,9 @@ def selftest():
                 f.write(json.dumps({'unit_sha': file_sha(skill), 'model': 'm1', 'pass': True, 'date': 'd'}) + '\n')
         run = lambda: {u: s for u, s, _ in check(os.path.join(tmp, 'suites'), model_of=lambda unit: 'm1', skills=skills)}
         got1 = run()
+        open(cases_py, 'w').write('checks v2')
+        got_edit = {u: (st, d) for u, st, d in check(os.path.join(tmp, 'suites'), model_of=lambda unit: 'm1', skills=skills)}
+        open(cases_py, 'w').write('checks v1')
         y_before = file_sha(os.path.join(skills, 'skill-y'))
         open(os.path.join(skills, 'shared-refs', 's.md'), 'w').write('two')
         got_shared = run()
@@ -275,9 +343,17 @@ def selftest():
         open(os.path.join(skill, 'references', 'r.md'), 'w').write('two')
         got2 = run()
         got = {k: v for k, v in got1.items() if not k.startswith('skill-')}
-        want = {'good': 'current', 'edited': 'stale', 'moved': 'stale', 'failed': 'failed', 'none': 'stale'}
+        want = {'good': 'current', 'edited': 'stale', 'moved': 'stale', 'failed': 'failed', 'none': 'stale',
+                'newest-fail': 'failed', 'newest-pass': 'current', 'suite-pass': 'current', 'suite-fail': 'failed'}
         ok = got == want
         print(('PASS' if ok else 'FAIL') + f' states: got {got}')
+        se_ok = (got_edit['suite-pass'][0] == 'stale' and got_edit['suite-fail'][0] == 'stale'
+                 and 'after a FAIL' in got_edit['suite-fail'][1] and 'after a FAIL' not in got_edit['suite-pass'][1]
+                 and got_edit['good'][0] == 'current')
+        print(('PASS' if se_ok else 'FAIL') + f' suite edited after the receipt: after a pass '
+              f'{got_edit["suite-pass"][0]}, after a fail {got_edit["suite-fail"][0]} (flagged '
+              f'{"after a FAIL" in got_edit["suite-fail"][1]}); a unit naming no suite unchanged {got_edit["good"][0]}')
+        ok &= se_ok
         sk_ok = got1.get('skill-kept') == 'current' and got2.get('skill-edited') == 'stale'
         print(('PASS' if sk_ok else 'FAIL') + f' a skill folder: current {got1.get("skill-kept")}, '
               f'stale after a reference edit {got2.get("skill-edited")}')
@@ -298,6 +374,45 @@ def selftest():
               f'your folder alone misses it: {"skill-p" not in one}')
         sk_ok &= frontmatter_model(skill) == 'inherit' and sh_ok and un_ok and pr_ok
         ok &= sk_ok
+
+        # A gap is not a verdict; an accepted unit holds only at the sha it was accepted at.
+        gs = os.path.join(tmp, 'gap-suites')
+        gsk = os.path.join(tmp, 'gap-skills')
+
+        def gunit(name, receipt=None, **extra):
+            os.makedirs(os.path.join(gs, name))
+            f = os.path.join(gsk, name)
+            os.makedirs(f)
+            open(os.path.join(f, 'SKILL.md'), 'w').write(f'---\nname: {name}\n---\nbody {name}\n')
+            json.dump({'unit': name, 'file': f, 'run': 'x', **extra}, open(os.path.join(gs, name, 'unit.json'), 'w'))
+            if receipt is not None:
+                with open(os.path.join(gs, name, 'receipts.jsonl'), 'w') as fh:
+                    fh.write(json.dumps({'unit_sha': file_sha(f), 'model': 'm1', 'date': 'd', **receipt}) + '\n')
+            return f
+        gunit('gap', {'pass': False, 'gaps': ['every arm ran every case'], 'failed': []})
+        gunit('real-fail', {'pass': False, 'gaps': [], 'failed': ['draft passes 75% of runs']})
+        gunit('clean-pass', {'pass': True, 'gaps': [], 'failed': []})
+        acc = gunit('accepted')
+        json.dump({'unit': 'accepted', 'file': acc, 'accepted': {'sha': file_sha(acc), 'date': 'd', 'by': 'record'}},
+                  open(os.path.join(gs, 'accepted', 'unit.json'), 'w'))
+        acs = gunit('accepted-suite', {'pass': False, 'gaps': [], 'failed': ['draft passes 75% of runs']}, suite=['x'])
+        unit_acs = json.load(open(os.path.join(gs, 'accepted-suite', 'unit.json')))
+        json.dump(dict(unit_acs, accepted={'sha': file_sha(acs), 'date': 'd', 'by': 'record'}),
+                  open(os.path.join(gs, 'accepted-suite', 'unit.json'), 'w'))
+        gr = lambda: {u: (s, d) for u, s, d in check(gs, model_of=lambda unit: 'm1', skills=gsk)}  # noqa: E731
+        got_r = gr()
+        got_g = {u: s for u, (s, _) in got_r.items()}
+        open(os.path.join(acc, 'SKILL.md'), 'a').write('upstream change\n')
+        open(os.path.join(acs, 'SKILL.md'), 'a').write('an edit\n')
+        after = gr()
+        got_acc2, got_acs2 = after.get('accepted', ('',))[0], after.get('accepted-suite', ('',))[0]
+        want_g = {'gap': 'stale', 'real-fail': 'failed', 'clean-pass': 'current', 'accepted': 'accepted',
+                  'accepted-suite': 'accepted'}
+        g_ok = (got_g == want_g and got_acc2 == 'untested' and got_acs2 == 'stale'
+                and 'without a suite' in got_r['accepted'][1] and 'as its suite measured it' in got_r['accepted-suite'][1])
+        print(('PASS' if g_ok else 'FAIL') + f' gaps and acceptance: got {got_g}; after a change, accepted '
+              f'{got_acc2} and accepted with a failed suite {got_acs2}')
+        ok &= g_ok
 
         # The model a unit runs on: its own newest launch first; else the family's most common id
         # across main logs, so one session on another model doesn't read as a rollout; a full id is the answer.

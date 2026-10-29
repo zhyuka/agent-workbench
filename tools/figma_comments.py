@@ -5,6 +5,8 @@
   python figma_comments.py check  <file_key> <draft.md>
   python figma_comments.py frame  <file_key> <node_id> [--show-hidden] [--vars]
   python figma_comments.py search <term> [<term> ...] [--file <key> ...]
+  python figma_comments.py pins   [--file <key> ...] [--all] [--new] [--lane batch]
+  python figma_comments.py stale  [--days 45] [--file <key> ...] [--all] [--new] [--lane batch]
 
 WHY THIS EXISTS. Comments drafted from build notes, without reading the live comments on the file,
 repeat threads that are already posted and describe nodes a reply has since changed or deleted. A
@@ -15,18 +17,18 @@ until `inbox` and `check` are clean.
   inbox  - every thread touched since --since, newest last, with replies nested under their root and
            an UNANSWERED marker on any reply to one of your own comments that you have not answered,
            in an open thread. A resolved thread with such a reply prints "resolved, not counted"
-           and has its own count line (TENTH FAILURE). Run it first, every time.
+           and has its own count line (RESOLVED THREADS). Run it first, every time.
   nodes  - every existing comment on specific node ids. Run before drafting a comment on a node:
            if a thread exists, reply in it rather than starting a second one. A comment counts if
            it is pinned to the node, to an ancestor with an offset inside the node's box, or to a
            layer inside the node; each thread prints which. Below that, figma_family.py lists the
            threads on the same layer of every other copy of the node's component, on any page.
-           See FIFTH, SEVENTH and NINTH FAILURE.
+           See OFFSET PINS, CHILD LAYERS and OTHER COPIES.
   check  - extracts node ids from a draft markdown and reports which already carry comments, so a
            duplicate is caught before it is posted rather than after. Same matching as `nodes`,
            family block included.
-  frame  - pulls a frame and walks it with hidden layers REMOVED, so a finding cannot be measured off
-           a node the designer switched off (THIRD FAILURE). Prints every paint, each TEXT node's
+  frame  - pulls a frame and walks it with hidden layers removed, so a finding cannot be measured off
+           a node the designer switched off (HIDDEN LAYERS). Prints every paint, each TEXT node's
            characters (not its layer name; EIGHTH FAILURE) and every per-character text run, and
            stamps each node it prints as read: figma_post.py will not post on a node `frame` has
            not printed, or whose frame has changed in Figma since. See FOURTH FAILURE in cmd_frame
@@ -34,67 +36,70 @@ until `inbox` and `check` are clean.
   search - every thread whose root or any reply holds all the terms, on every known file, resolved
            ones included and marked. Run before drafting a NEW comment: an open thread on the same
            subject can sit on a different node, which `nodes` and `check` cannot see. figma_post.py
-           refuses `new` on a file `search` has not covered in the last 30 minutes. SIXTH FAILURE.
+           refuses `new` on a file `search` has not covered in the last 30 minutes. See OTHER
+           NODES, SAME SUBJECT.
+  pins   - your open threads pinned to a node Figma has deleted or that sits under a hidden layer, on
+           every known file.
+  stale  - your open threads, not FIX notes, with no comment in 45 days, by page: one resolve batch.
+           With --new, either one suits a daily audit: it exits 1 only for a thread the last --new
+           run did not list, kept in ~/.cache/agent-workbench/figma_comment_flags.json.
 
 Every thread line ends with its permalink, ...?node-id=<node>#<comment id>. A link to the node alone
 opens the frame, not the discussion.
 
-The files `search` covers by default are kit_config's `figma.files` (see kit_config.py).
+The files `search`, `pins` and `stale` cover by default are kit_config's `figma.files` (see
+kit_config.py).
 
-THE FAILURES each part of this tool exists to prevent:
+HIDDEN LAYERS. A component slot the designer switched off (visible:false) still has a box and
+paints, so a finding measured on it is an artifact: a container that hugs its one visible child reads
+as overflowing, and text that never renders reads as a contrast bug. On a real frame a quarter of the
+nodes can be hidden, so eyeballing the JSON is not good enough. `frame` therefore drops any node with
+visible:false on itself or any ancestor before printing, and prints the dropped count so the filter
+is visible rather than silent.
 
-THIRD FAILURE: a finding measured on a hidden layer. A component's text slot with visible:false
-measures as "white text on white" and "the container overflows", and both are artifacts: the
-designer switched the layer off because that use of the component does not need it. On a real frame
-a quarter of the nodes can be hidden, so eyeballing the JSON is not good enough. `frame` therefore
-drops any node with visible:false on ITSELF OR ANY ANCESTOR before printing, and prints the dropped
-count so the filter is visible rather than silent.
-
-The inverse is the point of pulling at all: invisible PROPERTIES are the high-value read. Variable
+The inverse is the point of pulling at all: invisible properties are the high-value read. Variable
 bindings, component states, hover and dark-mode values cannot be checked by looking at the canvas.
 `--vars` reports the binding behind each fill for exactly that reason. Skip hidden layers, read hidden
 properties.
 
-SECOND FAILURE: "a thread exists on this node, reply in it". An early `check` said exactly that, and a
-comment about one subject was posted as a reply into a thread about another, because the node cited
-was a whole page frame carrying many unrelated threads. Matching by node says nothing about whether a
-thread is on the same SUBJECT. So the tool never tells you to reply. It prints each existing thread's
-opening words and makes you choose, and it warns when a node looks like a page-level container (3+
-root threads), where a new comment is almost always right. A node match is a prompt to read, not an
-instruction.
+SAME NODE, OTHER SUBJECT. A node match says nothing about whether a thread is on the same subject: a
+page frame can carry many unrelated threads, and a comment about one subject posted as a reply into
+a thread about another is the result. So `check` never tells you to reply. It prints each existing
+thread's opening words and makes you choose, and it warns when a node looks like a page-level
+container (3+ root threads), where a new comment is almost always right. A node match is a prompt to
+read, not an instruction.
 
-FIFTH FAILURE: a silent zero from matching on client_meta.node_id alone. Figma pins a comment made
-in the UI to a frame plus an offset, and re-pins some REST comments the same way after they post, so
-most root comments in a busy file carry a non-zero offset on an ancestor. Matching only the queried
-id prints "no existing comments" while one sits on the node. Both commands read each node's ancestor
-chain (figma_client.lineage) and also count a comment pinned to an ancestor whose offset lands
-inside the node's box. An id the file does not hold prints as not in this file, never as clear.
+OFFSET PINS. Figma pins a comment made in the UI to a frame plus an offset, and re-pins some REST
+comments the same way after they post, so most root comments in a busy file carry a non-zero offset
+on an ancestor, and matching only client_meta.node_id prints a silent zero. `nodes` and `check` read
+each node's ancestor chain (figma_client.lineage) and also count a comment pinned to an ancestor
+whose offset lands inside the node's box. An id the file does not hold prints as not in this file,
+never as clear.
 
-SIXTH FAILURE: the same subject on a different node. An open thread about a card's height can sit on
-the card's container while the new draft cites the card. `nodes` and `check` match by node, `inbox`
-cuts at --since, so only a search by subject finds it. `search` matches the words of every comment,
-and every thread line carries the link with its #comment id.
+OTHER NODES, SAME SUBJECT. An open thread on the same subject can sit on a different node (a card's
+container, while the draft cites the card), which `nodes` and `check` cannot see, and `inbox` cuts
+at --since. `search` matches the words of every comment, and every thread line carries the link with
+its #comment id.
 
-SEVENTH FAILURE: a thread on a child layer. A finding on a component is usually commented on one of
-its text layers, not on the component. locate() returns each node's subtree from the same request,
-and a comment pinned to any layer in it prints as "on child <id>".
+CHILD LAYERS. A thread about a component is often pinned to one of its layers. locate() returns each
+node's subtree from the same request, and a comment pinned to any layer in it prints as
+"on child <id>".
 
-NINTH FAILURE: a thread on another copy of the same component. A footer component appears on many
-pages; a question asked on one copy is invisible to a match by where a comment sits on another. Each
-command prints figma_family.py's block under every node: the threads on the same layer of any copy
-of each component on the node's path. A zero no longer prints a verdict; it prints what was
-searched. `check` also reads an id like I10:20;30:40 whole; its last part alone is the layer in the
-main component, not the one cited.
+OTHER COPIES. Copies of one component on different pages each carry their own threads, so a match by
+where a comment sits misses the same question asked on another copy. `nodes` and `check` print
+figma_family.py's block under every node: the threads on the same layer of any copy of each component
+on the node's path. A zero does not print a verdict; it prints what was searched. `check` reads an id
+like I10:20;30:40 whole: its last part alone is the layer in the main component, not the one cited.
 
-TENTH FAILURE: resolved threads counted as waiting on you. A marker that checks only who spoke last
-counts threads the design side resolved without replying. A resolved thread with such a reply now
-prints "resolved, not counted" in place of the marker, and the count of those prints on its own line
-under the UNANSWERED count. A teammate's reply posted after a resolve is not counted either.
+RESOLVED THREADS. A resolved thread waits on nobody, whoever spoke last. `inbox` marks UNANSWERED
+only in an open thread; a resolved thread with such a reply prints "resolved, not counted" in place
+of the marker, and the count of those prints on its own line under the UNANSWERED count. A
+teammate's reply posted after a resolve is not counted either.
 
 Auth: resolved by figma_auth.py (FIGMA_TOKEN or the OS keychain). Never printed. Run
 `python figma_auth.py` to see which source is in play.
 """
-import argparse, json, os, re, sys, urllib.request, urllib.error
+import argparse, json, os, re, sys, tempfile, urllib.request, urllib.error
 
 # Windows consoles are cp1252 by default, so ONE non-ASCII glyph raises UnicodeEncodeError and
 # aborts the run halfway through the report, and a truncated report reads like a short one.
@@ -320,7 +325,7 @@ def cmd_inbox(a):
                           and c.get("created_at", "") > my_last]
                 if theirs:
                     who = ", ".join(sorted({handle(t) for t in theirs}))
-                    # A resolved thread waits on nobody. Listed, never counted. See TENTH FAILURE.
+                    # A resolved thread waits on nobody. Listed, never counted. See RESOLVED THREADS.
                     if r.get("resolved_at"):
                         resolved_after += 1
                         print(f"    resolved, not counted: {who} replied after your last message here.")
@@ -379,7 +384,7 @@ def cmd_check(a):
     # still invisible.
     # A draft cites a node twice, as `123:4567` in its header and as 123-4567 in its Link URL.
     # Convert before de-duplicating, or the same node is listed and counted twice. A layer inside an
-    # instance, I10:2000;30:4000 (%3B in a URL), is one id. See NINTH FAILURE.
+    # instance, I10:2000;30:4000 (%3B in a URL), is one id. See OTHER COPIES.
     import figma_family
     ids = sorted({figma_family.norm(m) for m in re.findall(
         r"\b(I\d+[:-]\d+(?:(?:;|%3B)\d+[:-]\d+)+|\d{2,6}[:-]\d{3,6})\b", txt)})
@@ -523,6 +528,153 @@ def cmd_search(a):
     sys.exit(0 if hits else 1)
 
 
+def dead_pins(roots, chains):
+    """[(root, "DELETED" or "HIDDEN" or "UNREAD", detail)] for each root pinned to a node that is gone.
+    chains is lineage()'s answer: None = Figma no longer has the node; a chain with visible:false on the
+    node or a layer above it = hidden; an id missing from it was not read, which is never a clear."""
+    out = []
+    for r in roots:
+        n = node_of(r)
+        if not n:
+            continue
+        if n not in chains:
+            out.append((r, "UNREAD", n))
+        elif chains[n] is None:
+            out.append((r, "DELETED", n))
+        else:
+            off = [e for e in chains[n] if e.get("visible", True) is False]
+            if off:
+                out.append((r, "HIDDEN", f"{n} under {off[0].get('id')} {off[0].get('name')!r}"))
+    return out
+
+
+FLAGS = os.path.join(os.path.expanduser("~"), ".cache", "agent-workbench", "figma_comment_flags.json")
+
+
+def _read_open(a):
+    """([(key, roots, replies by root id, lineage of each pinned node)], [files not read]) for the
+    open thread roots by the token owner (--all: by anyone) on each --file, default figma.files.
+    Exits 2, DID NOT RUN, when there is no file to read or the token owner is unknown."""
+    keys = a.file or list(KNOWN_FILES)
+    if not keys:
+        print(f"{a.cmd}: DID NOT RUN: no Figma file to read. Pass --file KEY, or set figma.files in the "
+              "project's .claude/agent-workbench.json (kit_config.py).", file=sys.stderr)
+        sys.exit(2)
+    os.environ["FIGMA_CLIENT_LANE"] = a.lane
+    import figma_client
+    try:
+        me = "" if a.all else (os.environ.get("FIGMA_ME", "") or whoami())
+    except SystemExit as e:
+        me, why = "", e.code
+    else:
+        why = "no $FIGMA_ME and /v1/me failed"
+    if not a.all and not me:
+        print(f"{a.cmd}: DID NOT RUN: whose threads is unknown ({why}).")
+        sys.exit(2)
+    a.who = "" if a.all else f" by {me}"
+    out, failed = [], []
+    for key in keys:
+        try:
+            cs = fetch(key)
+            roots = [c for c in cs if not c.get("parent_id") and not c.get("resolved_at")
+                     and (a.all or me.lower() in handle(c).lower())]
+            replies = defaultdict(list)
+            for c in cs:
+                if c.get("parent_id"):
+                    replies[c["parent_id"]].append(c)
+            chains = figma_client.lineage_or_exit(key, [node_of(r) for r in roots if node_of(r)], kids=False,
+                                                  token=token(), tool="figma_comments")
+        except SystemExit as e:
+            failed.append(f"{key} ({e.code})")
+            continue
+        out.append((key, roots, replies, chains))
+    return out, failed
+
+
+def _flag_new(kind, ids):
+    """The ids this kind of report did not list at its last --new run. Saves the ids now listed, each
+    with the date it was first listed; one that drops off and comes back later is new again. Red once,
+    so a thread only someone else can move does not turn a daily audit red every day."""
+    import datetime
+    try:
+        with open(FLAGS, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    old = state.get(kind) or {}
+    state[kind] = {i: old.get(i, datetime.date.today().isoformat()) for i in ids}
+    os.makedirs(os.path.dirname(FLAGS), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(FLAGS), prefix=".tmp-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, FLAGS)
+    return {i: old.get(i) for i in ids}
+
+
+def _report(a, kind, found, failed, total_files, tail):
+    """Print found [(key, root, label, detail)] and exit: 2 when a file was not read, else 1 when any
+    is listed (with --new: any not listed at the last --new run), else 0."""
+    since = _flag_new(kind, [r["id"] for _, r, _, _ in found]) if a.new and not failed else {}
+    for key, r, label, detail in found:
+        mark = (f"since {since[r['id']]}" if since.get(r["id"]) else "NEW") if a.new and not failed else ""
+        print(f"  {label:8} {r.get('created_at', '')[:10]}  {mark:16} {detail}  {flat(r)[:80]}")
+        print(f"           {permalink(key, r)}")
+    print(f"\n{len(found)} thread(s) on {total_files - len(failed)} of {total_files} file(s)"
+          + (f", {sum(1 for v in since.values() if not v)} not listed before." if a.new and not failed else "."))
+    if found:
+        print(tail)
+    if failed:
+        print(f"⚠ DID NOT RUN on {', '.join(failed)}: a zero there is not a clear.")
+        sys.exit(2)
+    if a.new:
+        sys.exit(1 if any(not v for v in since.values()) else 0)
+    sys.exit(1 if found else 0)
+
+
+def cmd_pins(a):
+    """Open threads by you (--all: by anyone) pinned to a node Figma has deleted, or that sits under a
+    hidden layer. Design deletes and hides old frames as pages move on, and the thread stays open on
+    nothing; found by hand, they are found late."""
+    read, failed = _read_open(a)
+    found = []
+    for key, roots, _, chains in read:
+        dead = dead_pins(roots, chains)
+        print(f"{_META.get(key, ('', key))[1]} {key}: {len(roots)} open thread(s){a.who}, "
+              f"{sum(1 for r in roots if node_of(r))} pinned to a node, {len(dead)} on a dead pin.")
+        found += [(key, *d) for d in sorted(dead, key=lambda d: (d[1], d[0].get("created_at", "")))]
+    _report(a, "pins", found, failed, len(read) + len(failed),
+            "Resolve one whose subject is gone; one still true gets its root edited and its pin dragged "
+            "onto the live node in the Figma UI.")
+
+
+def cmd_stale(a):
+    """Open threads by you (--all: by anyone) with no comment in --days days, by page, oldest first.
+    FIX notes are left out, since design resolves those, and so are threads `pins` lists. The list is
+    for one approved resolve batch (figma_attach.py resolve); nothing is resolved here."""
+    import datetime
+    cut = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=a.days)).strftime("%Y-%m-%dT%H:%M:%S")
+    read, failed = _read_open(a)
+    found = []
+    for key, roots, replies, chains in read:
+        dead = {d[0]["id"] for d in dead_pins(roots, chains)}
+        old = []
+        for r in roots:
+            last = max(c.get("created_at", "") for c in [r] + replies[r["id"]])
+            if r["id"] in dead or flat(r).startswith("FIX") or last >= cut:
+                continue
+            chain = chains.get(node_of(r)) or []
+            page = chain[0].get("name") if chain else "(not pinned to a node)"
+            old.append((page, last, r))
+        print(f"{_META.get(key, ('', key))[1]} {key}: {len(roots)} open thread(s){a.who}, "
+              f"{len(old)} with nothing since {cut[:10]}.")
+        found += [(key, r, "STALE", f"last {last[:10]}  page {page!r}") for page, last, r in sorted(old, key=lambda o: (o[0], o[1]))]
+    _report(a, "stale", found, failed, len(read) + len(failed),
+            "Resolve the ones whose subject is settled in one approved batch (figma_attach.py resolve); "
+            "a question still owed an answer gets a nudge instead.")
+
+
 def _hex(f):
     c = f.get("color") or {}
     a = f.get("opacity", 1.0) * c.get("a", 1.0)
@@ -554,12 +706,61 @@ def _paints(ps):
 _RUN_NOISE = {"boundVariables", "isOverrideOverTextStyle", "textAutoResize", "fontPostScriptName",
               "inheritTextStyleId"}
 
+# styleOverrideTable states a variable-bound value in the collection's DEFAULT mode, while the node's
+# own `style` and `fills` are in the mode it sits in. On a phone frame, a title whose characters all
+# carry one entry would print the desktop mode's size and line height beside its real ones. A value
+# bound to the same variable as the node's own binding is the node's value (one variable, one node,
+# one mode), so it is taken from the node; one bound to another variable is printed as stated and
+# marked.
+_ENTRY_VARS = {"fontSize": "fontSize", "lineHeight": "lineHeightPx", "letterSpacing": "letterSpacing",
+               "fontFamily": "fontFamily"}
+
+
+def _var_id(ref):
+    """The variable id of a boundVariables value (an alias, or a list holding one); None otherwise."""
+    if isinstance(ref, list) and len(ref) == 1:
+        ref = ref[0]
+    return ref.get("id") if isinstance(ref, dict) and ref.get("type") == "VARIABLE_ALIAS" else None
+
+
+def _entry_in_mode(n, ov):
+    """(entry, others): override entry `ov` of TEXT node `n` with each value bound to the node's own
+    variable taken from the node, and the properties bound to a variable the node does not use."""
+    st, own_bv, bv = n.get("style") or {}, n.get("boundVariables") or {}, ov.get("boundVariables") or {}
+    out, others = dict(ov), set()
+    for key, prop in _ENTRY_VARS.items():
+        vid = _var_id(bv.get(key))
+        if not vid:
+            continue
+        if vid == _var_id(own_bv.get(key)) and prop in st:
+            out[prop] = st[prop]
+        elif prop in ov:
+            others.add(prop)
+    if ov.get("fills"):
+        own = {}
+        for p in n.get("fills") or []:
+            vid = isinstance(p, dict) and _var_id((p.get("boundVariables") or {}).get("color"))
+            if vid:
+                own.setdefault(vid, p)
+        fills = []
+        for p in ov["fills"]:
+            vid = isinstance(p, dict) and _var_id((p.get("boundVariables") or {}).get("color"))
+            if vid and vid in own:
+                fills.append(own[vid])
+            else:
+                if vid:
+                    others.add("fills")
+                fills.append(p)
+        out["fills"] = fills
+    return out, others
+
 
 def _runs(n):
     """Per-character style runs that differ from the base: [(start, end, {property: value})].
 
     A run's table entry restates most of the base style, so only the properties that differ are
-    kept, and a run that differs in nothing is dropped.
+    kept, and a run that differs in nothing is dropped. A value the entry binds to a variable the
+    node does not use is stated in the default mode, so it is printed with "(default mode)".
     """
     ids = n.get("characterStyleOverrides") or []
     table = n.get("styleOverrideTable") or {}
@@ -574,11 +775,21 @@ def _runs(n):
             spans.append([i, i + 1, oid])
     runs = []
     for s, e, oid in spans:
-        diff = {k: v for k, v in (table.get(str(oid)) or {}).items()
+        entry, others = _entry_in_mode(n, table.get(str(oid)) or {})
+        diff = {k: v for k, v in entry.items()
                 if k not in _RUN_NOISE and base.get(k, "NONE" if k == "textDecoration" else None) != v}
         if diff:
-            runs.append((s, e, diff))
+            runs.append((s, e, {k: (_Default(v) if k in others else v) for k, v in diff.items()}))
     return runs
+
+
+class _Default:
+    """A run value stated in the default mode: prints as the value plus "(default mode)"."""
+    def __init__(self, v):
+        self.v = v
+
+    def __str__(self):
+        return f"{self.v} (default mode)"
 
 
 def cmd_frame(a):
@@ -620,7 +831,12 @@ def cmd_frame(a):
         (hidden if eff else shown).append((depth, n, self_hidden))
         for c in n.get("children") or []:
             walk(c, eff, depth + 1)
-    walk(doc, False, 0)
+    # visible:false ABOVE the node hides it too, and the walk down from it cannot see that: a layer
+    # inside a hidden old frame reads as visible, and a thread can sit pinned there. Nothing under a
+    # hidden ancestor is stamped, so figma_post.py refuses to post on it.
+    chain = (lineage(a.file_key, [key]) or {}).get(key) or []
+    above = [e for e in chain[:-1] if e.get("visible", True) is False]
+    walk(doc, bool(above), 0)
 
     def line(depth, n):
         bb = n.get("absoluteBoundingBox") or {}
@@ -657,12 +873,20 @@ def cmd_frame(a):
             out += f"  MIXED: {len(runs)} run(s) override the base style"
             pad = "  " * min(depth, 8) + " " * 28
             for s, e, props in runs:
-                desc = ", ".join(f"{k}={_paints(v) if k == 'fills' else v}" for k, v in props.items())
+                desc = ", ".join(f"{k}={_paints(v) if k == 'fills' else v}" if not isinstance(v, _Default)
+                                 else f"{k}={_paints(v.v) if k == 'fills' else v.v} (default mode)"
+                                 for k, v in props.items())
                 text = re.sub(chr(10), " ", (n.get("characters") or "")[s:e])[:40]
                 out += f"\n{pad}chars {s}-{e} {text!r}: {desc}"
         return out
 
     print(f"{a.node_id}  {doc.get('name')!r}")
+    if above:
+        print("ANCESTOR HIDDEN: " + ", ".join(f"{e.get('id')} {e.get('name')!r}" for e in above)
+              + ". The node and everything in it are hidden; don't comment on it.")
+    elif not chain:
+        print("ANCESTORS UNREAD: no path from the page came back, so a hidden layer above this node "
+              "would not show here.")
     print(f"{len(shown)} visible node(s).  {len(hidden)} DROPPED as hidden "
           f"(visible:false on the node or an ancestor).")
     print("Findings must come from the visible list only. A hidden layer is off on purpose.")
@@ -714,5 +938,16 @@ if __name__ == "__main__":  # other tools may import search()
                    help="a file key to search, repeatable. Default: every file in figma.files "
                         "(the project's .claude/agent-workbench.json)")
     p.set_defaults(fn=cmd_search)
+    for name, fn, hlp in (("pins", cmd_pins, "open threads pinned to a deleted or hidden node"),
+                          ("stale", cmd_stale, "open threads, not FIX notes, with no comment in --days days")):
+        p = sub.add_parser(name, help=hlp)
+        p.add_argument("--file", action="append", metavar="KEY", help="a file key, repeatable; default figma.files")
+        p.add_argument("--all", action="store_true", help="everyone's open threads, not only the token owner's")
+        p.add_argument("--lane", default="interactive", help="figma_client lane; a scheduled audit passes batch")
+        p.add_argument("--new", action="store_true",
+                       help=f"exit 1 only for a thread the last --new run did not list ({FLAGS})")
+        if name == "stale":
+            p.add_argument("--days", type=int, default=45)
+        p.set_defaults(fn=fn)
     a = ap.parse_args()
     a.fn(a)

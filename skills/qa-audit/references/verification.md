@@ -31,18 +31,17 @@ as a defect. Use `CSS.forcePseudoState` over CDP on the element and every ancest
 mouse off the page, assert afterwards that `document.querySelectorAll(':hover')` is empty, and
 calibrate on an element whose hover is known to work.
 
-**Every failure is a cheap check that matched something next to the claim.** A regex matched the
-wrong property; a pattern matched two different text slots; a grep for a component name matched the
-name inside a comment in another file. Before trusting a check, state what it matches and confirm it
-is the same set as what you are claiming.
+**A cheap check matches something next to the claim.** A regex matched the wrong property; a
+pattern matched two different text slots; a grep for a component name matched the name inside a
+comment in another file. Before trusting a check, state what it matches and confirm it is the same
+set as what you are claiming.
 
 ## 2. Where measurement is blind
 
-Run these four every time. Rounds of measurement that verified geometry, contrast, overflow and
-focus to four decimals have returned SHIP on a page where two minutes of actually using it found
-five bugs.
+Measurement without these four checks produces a confident false pass: motion quality, illustration
+fidelity, undesigned affordances and asset currency. Run them every time.
 
-**Motion quality: compare rest against the hover END state.** Capture after a wait longer than the
+**Motion quality: compare rest against the hover end state.** Capture after a wait longer than the
 site's transitions, then diff rest against hover. Known causes worth recognising: an element that
 collapses to 0 before growing is transitioning `flex-grow` and `flex-basis` together (animate one
 property); text re-wrapping on every frame is a fluid-width text block (pin it to its final width and
@@ -59,7 +58,7 @@ matrix.** Measure motion as `getBoundingClientRect` deltas.
 
 **Illustration fidelity: diff at native resolution.** A scaled full-page shot hides a CSS-approximated
 avatar, a `color: transparent` that hid an initial, and a 0.5px hairline that snapped to a bright 1px
-line. Gate on the mean OR the worst row band: a hairline barely moves the mean but spikes one row.
+line. Gate on the mean or the worst row band: a hairline barely moves the mean but spikes one row.
 Keep the thresholds in the code, calibrated against measured noise. Two preconditions a diff can't
 check for you: crop both sides to the same section, and confirm the page renders deterministically
 (capture it twice and diff it against itself first if it animates).
@@ -75,13 +74,15 @@ mean-pixel diff.
   stops sampling its backdrop and a frosted pill goes see-through. A design tool drawing a hover row
   at 0.9 opacity, ported literally, is a breakage, not a dim. Seen as a region mean moving 35.6 to
   34.6 while the pill visibly vanished. If the rule also exists as a phone rest state, the pill is
-  broken permanently there. Grep the BUILT CSS after the fix.
+  broken permanently there, and fixing only the `:hover` rule leaves the rest rule in the built
+  CSS: grep the built CSS after the fix.
 - A stretched card link (`a::after { position: absolute; inset: 0 }`) paints over inner elements, so
   an inner `:hover` never resolves while the cursor still reads `pointer`. Drive the child from the
   card's hover.
 - Whenever a container gains `opacity`, `filter`, `transform` or a stretched `::after`, check what it
-  contains: walk the live tree from every `backdrop-filter` element up its ancestors for a computed
-  opacity below 1, and run an `elementFromPoint` occlusion test at each one's centre.
+  contains and render both states side by side: walk the live tree from every `backdrop-filter`
+  element up its ancestors for a computed opacity below 1, and run an `elementFromPoint` occlusion
+  test at each one's centre.
 
 **Asset currency.** The designer keeps working. Re-pull the design before auditing fidelity.
 
@@ -93,12 +94,11 @@ one device pixel off its box. Move it to a whole pixel with `position: relative`
 
 A checker that can emit a false pass is worse than none: it launders the defect.
 
-- **Assert your own preconditions and abort rather than pass.** A raced viewport once measured 980
-  wide and printed OK; an error page once printed OVERFLOW. Re-navigate until the page is healthy, or
-  abort.
-- **A check that cannot catch its own defect is theatre.** A diff first reported MATCH on the very
-  hairline it was written to catch. A near-duplicate check built on Python's difflib was useless
-  until `autojunk=False`.
+- **Assert your own preconditions and abort rather than pass.** A raced viewport or an error page,
+  measured as if it were the page, prints a confident OK or OVERFLOW. Re-navigate until the page is
+  healthy, or abort.
+- **A check that cannot catch its own defect is theatre.** A near-duplicate check built on Python's
+  difflib was useless until `autojunk=False`.
 - **A selector matching zero elements is a FAIL, not a pass.**
 - **A filter on the wrong field silently drops most of its input.** An extractor that read only text
   nodes lost every sticky, shape and table cell of a board while reporting a clean run. Check what
@@ -121,9 +121,9 @@ mockup) can be right at both design widths and wrong between them, so also measu
 between and check the invariant; a break found only there is out of scope for the loop below and goes
 to the tracker.
 
-**Verify the whole affected class in the BUILT output.** When a change touches a shared path (a
+**Verify the whole affected class in the built output.** When a change touches a shared path (a
 markdown renderer, a global CSS rule, a layout template, a shared helper) it affects every page built
-from it. Grep all of the build output for the changed marker AND count the denominator: "0 of 87
+from it. Grep all of the build output for the changed marker and count the denominator: "0 of 87
 pages still show it". `tools/class_check.py` from this plugin prints that pair and refuses one
 number without the other. For future inputs the guarantee is structural (the shared code can no
 longer emit the old form); say so, and never imply you tested pages that don't exist yet.
@@ -163,25 +163,16 @@ Screenshots don't catch these.
 
 ## 6. Build output vs source
 
-**The proxy rule.** Almost every miss a person had to catch HAD a check; it ran, passed, and measured
-something that was not the claim:
-
-| claimed | checked | why it passed while wrong |
-|---|---|---|
-| "the chip links to the page" | `href` set in the component's data | the template hard-coded a `<div>` and ignored `href` |
-| "the route is wired" | grep of the source found the route | the hit was inside an HTML comment |
-| "build is clean" | a build log | the log predated the edits; the output was stale |
-| "contrast passes" | worst pixel in a region of the image file | no glyph sits there; the page crops elsewhere |
-| "the field saved" | the CLI exited 0 | the shell ate everything after `&`; the value was truncated |
-
-The claim is about the end state a person experiences; the evidence was an intermediate artifact
-just edited. Before asserting, name the artifact the person touches and cite only that: the built
-output or the live render, never the source; the value read back, never the exit code; the composited
-pixels under the real glyph boxes, never a region of the source image; the design node's own render,
-never a remembered impression; a comment's full thread, never a paraphrase of one reply.
+**The proxy rule.** Most misses a person has had to catch had a check: it ran, it passed, and it
+measured something that was not the claim. The claim is about the end state a person experiences;
+the evidence was an intermediate artifact just edited. Before asserting, name the artifact the
+person touches and cite only that: the built output or the live render, never the source; the value
+read back, never the exit code; the composited pixels under the real glyph boxes, never a region of
+the source image; the design node's own render, never a remembered impression; a comment's full
+thread, never a paraphrase of one reply.
 
 **"Everywhere" is a tool, not an inspection.** "Across the site" or "every X" cannot be verified by
-looking; write the enumerating check first, before the edits.
+looking; write the enumerating check first, before the edits, at the moment the invariant is stated.
 
 **A gate that cries wolf gets ignored,** so fix its own false positives. When a check legitimately
 should not apply, declare the exemption in the report rather than quietly omitting a filter.
@@ -212,7 +203,7 @@ count over built CSS reads 0. Parse the built CSS to count media-gated rules.
 - **True device emulation, not a window size.** A window size can set the screenshot size while the
   page lays out at a different, wider viewport. Use Playwright's viewport and device options, or CDP
   `Emulation.setDeviceMetricsOverride`.
-- **A real overflow has offenders AND `scrollWidth > viewport`.** If `scrollWidth == viewport` it was
+- **A real overflow has offenders and `scrollWidth > viewport`.** If `scrollWidth == viewport` it was
   a screenshot artifact; say so rather than filing it.
 - **Disabling the GPU drops paint** on translucent and `backdrop-filter` surfaces, so text over a
   dark translucent band can read as an empty box. Before "fixing" invisible text there, read

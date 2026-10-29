@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """workspace_audit.py - one mechanical end-to-end pass over the whole working set.
 
-The answer to a fair question: "are you sure you read literally everything?" A model cannot
-reliably read 30 skill files, 100 memory cards and several root docs in one sitting and report
-honestly about all of them. This script can. Every check returns N of M with the misses named,
+WHY. A model cannot reliably read 30 skill files, 100 memory cards and several root docs in one
+sitting and report honestly about all of them. This script can. Every check returns N of M with the misses named,
 never a bare numerator, so the output is a measurement rather than a claim.
 
 Checks, in order of how often they tend to catch something:
@@ -16,10 +15,12 @@ Checks, in order of how often they tend to catch something:
   root      every file at the workspace root is on the sanctioned list
   xrefs     every `file.md` §N cross-reference in a skill lands on a real heading
   map       every folder the workspace map names exists, and every live folder has a line
+  adostate  no doc calls an ADO item open, pending or tracked once ADO has closed or removed it
   config    ~/.claude allow rules (no cross-list duplicate or dead-path rule), no scratch project
             or empty session-env folder older than 14 days
 
-With no check named, it runs all of them. `secrets` prints only file:line, never the matched text.
+With no check named, it runs all of them, adostate only when ado.org is set (kit_config.py); name it
+to run it anyway. `secrets` prints only file:line, never the matched text.
 
 CONFIG (agent-workbench config, key `workspace`; --root overrides workspace.root):
   root         the working folder to audit. Required.
@@ -35,6 +36,8 @@ CONFIG (agent-workbench config, key `workspace`; --root overrides workspace.root
   tools        the tools folder (default <root>/tools)
   memory       the memory folder (default ~/.claude/projects/<root as a slug>/memory)
   generated    file names a skill tells you to CREATE: a citation of one is not a miss
+  ado_docs     files or folders, relative to root, whose .md files adostate also reads: docs others
+               read, such as a repo's README, CLAUDE.md and rules (default none)
 
 Usage
   workspace_audit.py [check ...] [--root DIR] [-v]
@@ -48,10 +51,12 @@ Exit codes
 """
 
 import argparse
+import json
 import os
 import pathlib
 import re
 import sys
+import time
 
 # Findings quote skill text, which carries section marks and emoji. Printing those to a non-UTF-8
 # console raises UnicodeEncodeError mid-report, so a real failure reads as a tool bug.
@@ -169,6 +174,21 @@ def name_index():
     return _NAME_INDEX
 
 
+# A line that cites a file to say it is gone, absent or elsewhere: correct prose, not rot. `branch`
+# covers a doc correctly citing a file that lives on ANOTHER branch: this check reads the working tree,
+# so it cannot see one.
+_PROSE_OK = re.compile(r'(there is no|deliberately no|absent when|create on first|never create|'
+                       r'no longer|do not create|does not exist|no such file|\bdead\b|\bstale\b|'
+                       r'hallucinat|attachment|\bbranch\b)', re.I)
+
+
+def _told_gone(line, raw):
+    """True when `line` cites `raw` to say it is gone: a _PROSE_OK shape, or "the old `x`" / "the
+    retired `x`" just before the citation (read there alone: a README row can be one long line)."""
+    return bool(_PROSE_OK.search(line) or re.search(
+        r'\b(the old|the retired|retired)\s*`?$', line[:max(line.find(raw), 0)][-40:], re.I))
+
+
 def check_cites(verbose):
     """KNOWN LIMIT, stated so a green result is not over-read: resolution is by FILENAME, not path.
     A doc citing `START-HERE.md` passes as long as SOME START-HERE.md exists anywhere, even after the
@@ -196,16 +216,9 @@ def check_cites(verbose):
             if leaf in names:
                 continue
             # A doc citing a filename to say it should NOT exist, or is absent by design, is correct.
-            # Without this the check flags its own rules as rot. Look at the line the citation is on.
-            line = next((l for l in text.splitlines() if raw in l), '')
-            if re.search(r'(there is no|deliberately no|absent when|create on first|never create|'
-                         r'no longer|do not create|does not exist|no such file|\bdead\b|\bstale\b|'
-                         r'hallucinat|attachment|\bbranch\b)', line, re.I):
-                # `branch` covers a doc correctly citing a file that lives on ANOTHER branch: this
-                # check reads the working tree, so it cannot see one.
-                continue
-            # "the old `x`" or "the retired `x`" names a file as gone. Read just before the citation.
-            if re.search(r'\b(the old|the retired|retired)\s*`?$', line[:max(line.find(raw), 0)][-40:], re.I):
+            # Without this the check flags its own rules as rot. Every line the citation sits on is
+            # read, not the first alone, so a name cited twice is judged by both lines.
+            if all(_told_gone(l, raw) for l in [l for l in text.splitlines() if raw in l] or ['']):
                 continue
             if 'xxx' in cand.lower() or cand.startswith('/'):
                 continue
@@ -405,8 +418,8 @@ def check_root(verbose):
 
 # --------------------------------------------------------------------------- xrefs
 def check_xrefs(verbose):
-    """A `file.md` §N citation must resolve to a heading in that file. A section renumbered once
-    leaves every copy of the citation pointing nowhere, and nothing notices, because a
+    """A `file.md` §N citation must resolve to a heading in that file, "## N." or "## §N.". A section
+    renumbered once leaves every copy of the citation pointing nowhere, and nothing notices, because a
     cross-reference is prose and prose is not checked."""
     if not SKILLS.exists():
         return Result('xrefs', 0, 0, [], 'no skills dir')
@@ -415,7 +428,7 @@ def check_xrefs(verbose):
     def headings(p):
         if p not in heads:
             try:
-                heads[p] = set(re.findall(r'^#+\s*(\d+(?:\.\d+)*)\.?\s', p.read_text(
+                heads[p] = set(re.findall(r'^#+\s*§?\s*(\d+(?:\.\d+)*)\.?\s', p.read_text(
                     encoding='utf-8', errors='replace'), re.M))
             except OSError:
                 heads[p] = set()
@@ -748,9 +761,98 @@ def selftest_secrets():
     return 0 if good else 1
 
 
+# --------------------------------------------------------------------------- adostate
+# A doc line that names an ADO item as open, pending or tracked after ADO closed or removed it goes
+# false without anyone editing it: a handoff doc keeps saying a change is coming, "tracked as #N", long
+# after #N closed without it. The states come from ado_rest.py's cache, as fresh as its last pull: an
+# item closed since reads open (a miss, never a false alarm), and the note gives the cache's age. A line
+# that says closed, done or removed next to the number is already telling the truth and is left alone.
+ADO_WORD = (r"(?:still |stays |remains? |is )?(?:open|pending|upcoming|in progress|tracked(?: as| in| by| on)?"
+            r"|waiting|owed|to do|not yet (?:done|fixed|closed)|being (?:revised|worked|fixed)|blocked on)")
+ADO_NUM = r"(?:\*\*)?(?:ADO )?(?:#|_workitems/edit/)(\d{3,5})(?:\*\*)?"
+ADO_CLAIM = re.compile(rf"\b{ADO_WORD}\b[^.;|]{{0,25}}?{ADO_NUM}|{ADO_NUM}[^.;|]{{0,25}}?\b{ADO_WORD}\b", re.I)
+ADO_SHUT = re.compile(r"\b(closed|resolved|done|removed|shipped|completed|moot|won't fix)\b", re.I)
+
+
+def adostate_files():
+    """doc_files(), plus the .md files under each workspace.ado_docs entry (a file or a folder,
+    relative to root): docs others read that cites and secrets don't."""
+    yield from doc_files()
+    if ONLY is not None:
+        return
+    for rel in cfg('ado_docs', []):
+        p = ROOT / os.path.expanduser(rel)
+        if p.is_file():
+            yield p
+        elif p.is_dir():
+            yield from sorted(q for q in p.rglob('*.md') if 'node_modules' not in q.parts)
+
+
+def adostate_findings(files, states):
+    """(claims, misses): lines that give an ADO item a state, and those whose item is closed or removed."""
+    claims, misses = 0, []
+    for f in files:
+        try:
+            lines = pathlib.Path(f).read_text(encoding='utf-8', errors='replace').splitlines()
+        except OSError:
+            continue
+        for i, ln in enumerate(lines, 1):
+            for m in ADO_CLAIM.finditer(ln):
+                n = int(m.group(1) or m.group(2))
+                claims += 1
+                st, when = states.get(n, (None, ''))
+                if st in ('Closed', 'Removed') and not ADO_SHUT.search(ln[max(0, m.start() - 80):m.end() + 80]):
+                    where = str(f).replace(str(HOME), '~')
+                    misses.append(f"{where}:{i} calls #{n} {m.group(0).strip()!r}; ADO has it {st} since {when}")
+                    break
+    return claims, misses
+
+
+def check_adostate(verbose):
+    try:
+        import ado_rest
+        with open(ado_rest.CACHE, encoding='utf-8') as fh:
+            cache = json.load(fh)
+    except Exception as e:      # no cache, no config: the check did not run, never "nothing stale"
+        return Result('adostate', 0, 0, [], f'DID NOT RUN: no ADO cache ({type(e).__name__}); run ado_rest.py pull')
+    states = {int(k): (v['fields'].get('System.State'),
+                       (v['fields'].get('Microsoft.VSTS.Common.StateChangeDate') or '')[:10])
+              for k, v in (cache.get('items') or {}).items()}
+    claims, misses = adostate_findings(adostate_files(), states)
+    age = (time.time() - cache.get('pulled', 0)) / 3600
+    return Result('adostate', claims - len(misses), claims, misses,
+                  f'lines that give an ADO item a state, read against the cache pulled {age:.0f} h ago')
+
+
+def selftest_adostate():
+    """Planted lines: three ways of calling a closed item open are each caught; a line that says
+    closed, an open item, an unrelated "open" and an item ADO doesn't hold are not."""
+    states = {1101: ('Closed', '2026-08-29'), 1102: ('Closed', '2026-08-31'), 2201: ('Active', '2026-10-22')}
+    import tempfile as _t
+    with _t.TemporaryDirectory() as d:
+        bad, good = pathlib.Path(d, 'bad.md'), pathlib.Path(d, 'good.md')
+        bad.write_text("- **To do (open, tracked - ADO #1101)**: captions.\n"
+                       "and ADO #1101 stays open until someone closes it.\n"
+                       "a one-line change, tracked as **ADO #1102**. More text.\n", encoding='utf-8')
+        good.write_text("tracked as **ADO #1102** (closed without the change)\n"
+                        "ADO #2201 is still open.\n"
+                        "Open them: requirements are often a screenshot (#1101 holds 67 MB).\n"
+                        "tracked in #9999, which ADO doesn't hold.\n"
+                        'Open, unrelated: #1101 "Cross-page // Token cleanup and more" was closed.\n',
+                        encoding='utf-8')
+        cb, mb = adostate_findings([bad], states)
+        cg, mg = adostate_findings([good], states)
+    results = [('adostate: three ways of calling a closed item open are each caught', len(mb) == 3 and cb == 3),
+               ('adostate: a line saying closed, an open item, a stray "open" and an unknown item are not',
+                mg == [] and cg == 4)]
+    for name, ok in results:
+        print(('PASS ' if ok else 'FAIL ') + name)
+    return 0 if all(r[1] for r in results) else 1
+
+
 CHECKS = {'cites': check_cites, 'secrets': check_secrets, 'archive': check_archive,
           'naming': check_naming, 'tools': check_tools, 'root': check_root,
-          'xrefs': check_xrefs, 'map': check_map, 'config': check_config}
+          'xrefs': check_xrefs, 'map': check_map, 'adostate': check_adostate, 'config': check_config}
 
 
 def main():
@@ -761,18 +863,20 @@ def main():
     ap.add_argument('--root', help='the working folder to audit (default: workspace.root in config)')
     ap.add_argument('-v', '--verbose', action='store_true')
     ap.add_argument('--selftest', action='store_true',
-                    help='plant a tree and break each map, config, archive and secrets rule once')
+                    help='plant a tree and break each map, config, archive, secrets and adostate rule once')
     a = ap.parse_args()
     if a.selftest:
         global SKIP_DIRS
         SKIP_DIRS = set(BASE_SKIP)
-        return max(selftest_map(), selftest_config(), selftest_archive(), selftest_secrets())
+        return max(selftest_map(), selftest_config(), selftest_archive(), selftest_secrets(), selftest_adostate())
     try:
         configure(a.root)
     except kit_config.NotConfigured as e:
         print(f'workspace_audit.py: {e}', file=sys.stderr)
         return 2
-    checks = a.checks or list(CHECKS)
+    # Without an ADO org the adostate check has nothing to read, so a bare run leaves it out rather
+    # than report every run PARTIAL.
+    checks = a.checks or [c for c in CHECKS if c != 'adostate' or kit_config.get('ado', 'org')]
     if not ROOT.exists():
         print(f'no workspace at {ROOT}', file=sys.stderr)
         return 2

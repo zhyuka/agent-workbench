@@ -39,7 +39,7 @@ The tools need Python 3.9 or later. A few drive a browser and also need Playwrig
 
 All of them are in [`tools/`](tools). By area:
 
-- **Claude Code logs and memory.** `cc_logs` finds every session log on the machine, backups included. `log_extract` pulls out everything you typed, with a real denominator. `session_close` says what a session left open. `memory_index` generates `MEMORY.md` from each card's own index line. `ledger` and `digest` track every request you made and its state. Also `tool_time`, `skill_use`, `skill_lint`, `memory_check`, `recall`, `seals`, `pushback_score`, `weekly_metrics`, `agent_gate_stale` and `statusline_model`.
+- **Claude Code logs and memory.** `cc_logs` finds every session log on the machine, backups included. `log_extract` pulls out everything you typed, with a real denominator. `session_close` says what a session left open. `ledger` and `digest` track every request you made and its state. Also `tool_time`, `skill_use`, `skill_lint`, `recall`, `seals`, `pushback_score`, `weekly_metrics`, `agent_gate_stale` and `statusline_model`.
 - **Checks that report N of M.** `class_check` counts how many files in a class got a shared change. `verify_ledger` answers "was it verified?" from a file. Also `workspace_audit`, and `doclint`, a docs linter and pre-commit gate.
 - **Figma.** `figma_client` is one REST client with a shared budget and a pause on 429. `figma_comments` reads a thread before you write to it. Also `figma_post`, `figma_attach`, `figma_family`, `figma_evidence`, `figma_auth` and `drafts_store`.
 - **Azure DevOps.** `ado` refuses a create that hasn't searched for duplicates. `ado_rest` and `ado_write` use REST with a PAT, so nothing waits on an `az` prompt.

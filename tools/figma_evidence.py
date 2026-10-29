@@ -78,6 +78,22 @@ def before_version(versions, when):
     return ok[-2]["id"] if len(ok) > 1 else None
 
 
+def versions(key, oldest_needed, get=None):
+    """The file's versions from the newest back to the two that hold it at `oldest_needed` (the open
+    session and the one before), page by page. A page holds 30; reading only the first makes an edit
+    older than the 30 newest versions refuse with "no version holds the file before" it.
+    figma_client takes a next_page URL as it comes."""
+    get = get or _get
+    out, url = [], f"{API}/files/{key}/versions"
+    while url:
+        page = get(url)
+        out += page.get("versions") or []
+        if sum(v["created_at"] <= oldest_needed for v in out) >= 2:
+            break
+        url = (page.get("pagination") or {}).get("next_page")
+    return out
+
+
 def render(key, frame, version=None):
     """The node as Figma draws it, asked for at 2x, as an RGBA PIL image of exactly its box
     (use_absolute_bounds). Figma returns less than 2x for a render over about 32 MP; panel() reads
@@ -323,8 +339,7 @@ def sheet(key, frame, out, before_at=None, before_png=None, crop=None, build=Non
             box = tuple(round(2 * c) for c in crop[:2]) + tuple(round(2 * (c + d)) for c, d in zip(crop[:2], crop[2:]))
             before = before.crop(box)
     else:
-        vs = _get(f"{API}/files/{key}/versions").get("versions") or []
-        v = before_version(vs, before_at)
+        v = before_version(versions(key, before_at), before_at)
         if not v:
             print(f"REFUSED: no version of {key} holds the file before {before_at}; pass --before-png.")
             return 1
@@ -384,6 +399,15 @@ def selftest():
     case("edit at 06:10, inside v3's session: v2", before_version(vs, "2026-10-21T06:10:00Z") == "v2")
     case("edit before the first session: none", before_version(vs, "2026-10-21T01:00:00Z") is None)
     case("edit after the last session: the version before the last", before_version(vs, "2026-10-21T09:00:00Z") == "v2")
+    pages = {f"{API}/files/K/versions": {"versions": vs[:0:-1], "pagination": {"next_page": "https://api.figma.com/v1/files/K/versions?page_size=30&before=v2"}},
+             "https://api.figma.com/v1/files/K/versions?page_size=30&before=v2": {"versions": vs[:1], "pagination": {}}}
+    asked = []
+    got = versions("K", "2026-10-21T05:50:00Z", get=lambda u: asked.append(u) or pages[u])
+    case("an edit older than the first page: the second page is read and v1 found",
+         before_version(got, "2026-10-21T05:50:00Z") == "v1" and len(asked) == 2)
+    asked.clear()
+    versions("K", "2026-10-21T06:10:00Z", get=lambda u: asked.append(u) or pages[u])
+    case("two versions at or before the edit on page 1: page 2 is not asked for", len(asked) == 1)
     s = compose([("Before: Figma", a), ("After: Figma", b), ("Build at 390", b)], ["one note", "two"])
     case("three 2x panels at half size, side by side, with labels and notes",
          s.width == 24 * 2 + 3 * 390 + 2 * 24 and s.height == 64 + 200 + 20 + 44 + 24)

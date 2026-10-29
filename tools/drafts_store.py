@@ -26,8 +26,8 @@ EDIT draft of the same comment) stays, and the post names the drafts it kept on 
 session deletes the right one by hand.
 
 A quote's lines are wrapped for the file, and Figma keeps every line break, so a quote copied as
-a comment's text posts with a break every line. figma_post.py new and reply refuse such text
-(wrapped_refusal()); text_of() joins a quote back into one line per paragraph, keeping list items,
+a comment's text posts with a break every line. figma_post.py new and reply, and figma_attach.py
+edit, refuse such text (wrapped_refusal()); text_of() joins a quote back into one line per paragraph, keeping list items,
 blank lines and lines that end in a link or a colon.
 
 BLIND TO a draft posted on a node other than the one its heading names, and to Cut rows that name

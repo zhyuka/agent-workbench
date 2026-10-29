@@ -70,7 +70,8 @@ a long `--body` over `az` has failed silently and exited 0.
   a Story: both sit in one backlog category, so ADO hides the child's parent from the backlog view.
   Only a Bug or a Task sits under a Story, so a Story that belongs to a page gets the Feature as
   parent and the page Story as `related`. Converting it to a Bug also works when it is genuinely a
-  defect (`ado_write.py field <id> System.WorkItemType Bug`, then read it back).
+  defect (`ado_write.py field <id> System.WorkItemType Bug`, then read it back). If ADO refuses the
+  change, it is a manual edit in the browser.
 - Epics and Features sit at the project root on purpose; the non-root rule is for Stories, Bugs and
   Tasks.
 - Derive checkable AC from the body; a body too thin to derive AC from is the defect, so never invent
@@ -129,14 +130,17 @@ which flags an ahead-count as `comment-stale-branch`.
 
 ## 4. Writing work-item content
 
-Before you write a title, description, acceptance criteria or comment, read
-`references/writing-work-items.md`: clickable references, body versus comment, comment length, the
-one-comment rule and @mentions.
+Before you write a description, acceptance criteria or comment, read
+`references/writing-work-items.md`: clickable links, body versus comment, fixing an unread error in
+place, short comments and one per thread, @mentions and attachments. The title convention and the
+AC are set and linted by `ado.py new` (§2).
 
 ## 5. Review lands on a resolved item
 
-When feedback arrives on something already resolved, read `references/review-triage.md`: the triage
-order, when to reopen versus file new, and how to turn a reviewer's list into a recommendation.
+When feedback arrives on something already resolved, read `references/review-triage.md`: when to
+reopen versus file new, checking the points against each other, splitting a batch by cost, and
+turning a reviewer's list into a recommendation. A reopened item restates its original evidence
+rather than replacing it.
 
 ## 6. Reconcile the board
 

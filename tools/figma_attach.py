@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""figma_attach.py - the steps the REST API cannot do: edit a Figma comment, put pictures in it, and
-turn "@Last, First" into a mention that notifies. All of a batch's steps run in ONE browser.
+"""figma_attach.py - the steps the REST API cannot do: edit a Figma comment, put pictures in it, turn
+"@Last, First" into a mention that notifies, and resolve a thread. All of a batch's steps run in one
+browser.
 
     attach  <file_key> <comment_id> <picture> [<picture> ...] [--again] [--wait-user SECONDS]
     edit    <file_key> <comment_id> --text-file <file.txt> [<picture> ...] [--replace] [--wait-user SECONDS]
@@ -9,6 +10,8 @@ turn "@Last, First" into a mention that notifies. All of a batch's steps run in 
               the old one does not stay beside it)
     mention <file_key> <comment_id> [<comment_id> ...]
               each "@Last, First" in each comment becomes a mention chip, all in one browser
+    resolve <file_key> <comment_id> [<comment_id> ...] [--wait-user SECONDS]
+              resolves each thread (give its root's id), all in one browser; see RESOLVE
     probe   <file_key> <comment_id> [...] [--picker "Last, First"]
               opens each thread and its editor in one browser and cancels; --picker types "@First" and
               says whom it would pick. Saves nothing: the live check after a Figma change
@@ -16,9 +19,9 @@ turn "@Last, First" into a mention that notifies. All of a batch's steps run in 
 
 ONE BROWSER PER BATCH. A tool that launches, signs in to and deletes a fresh browser for every UI
 step is slow and fragile. run_jobs() takes every step of a batch (pictures, edits, mentions,
-probes), refuses them all before any browser opens if one is refused, runs them in one browser from
-signed_in_browser.py, and checks each over REST once the browser is gone. figma_post.py batch and
-new/reply hand it everything they posted.
+resolves, probes), refuses them all before any browser opens if one is refused, runs them in one
+browser from signed_in_browser.py, and checks each over REST once the browser is gone.
+figma_post.py batch and new/reply hand it everything they posted.
 
 MENTION. REST posts "@Last, First" as plain text and notifies nobody; the Plugin API and the Figma MCP
 have no comments. In the editor the tool selects the plain "@Last, First", types "@First", and picks
@@ -26,6 +29,20 @@ the one option that reads the whole handle, is not a guest, and has no other opt
 surname; anything else cancels with nothing saved. After Save the markdown form of the comment
 (?as_md=true) must drop the "@": mentions made in the UI read that way, and ones typed over REST keep
 it. A mention added this way notifies the person.
+
+RESOLVE. REST cannot resolve a comment; only the web app can. From one REST read of the file, it
+refuses every id, before any browser opens, when one id is not in the file, is a reply (resolve takes
+the thread's root), is a thread already resolved, has no text to find it by on the page (a
+picture-only root), or is a teammate's thread whose newest comment is a teammate's. You resolve your
+own threads and moot ones; a thread a teammate is still discussing is theirs. Then, in one browser,
+it opens each thread and clicks "Mark as resolved" in the header of the open thread that holds the
+root's text, and waits for that header to read "Mark as unresolved" (opening the link again if the
+thread closed). The Comments panel draws the same "Mark as resolved" on every card, so the click is
+scoped to the open thread, never the page. A screenshot per thread goes to
+~/.cache/agent-workbench/figma_attach/<id>-resolve.png. Once the browser is gone it reads REST again
+and prints RESOLVED <id> or NOT RESOLVED <id>: <why> for each, from resolved_at; it also names any
+other thread in the file that turned resolved during the run. Exit 0 only when REST shows every id
+resolved and no other thread changed.
 
 EDIT. REST cannot edit a comment (PUT is 404), so without this every approved rewrite of your own
 comment comes back to you as a hand step. `edit` does that step: the same browser and sign-in as
@@ -35,10 +52,11 @@ Shift+Enter), a check that the editor now holds exactly the file's text and stil
 attachment it had, then the pictures if any, Save, and a check over REST that the comment's message
 is the file's text. It refuses before any browser opens when the comment is someone else's, when it
 has replies (an edit would change what they answer; reply after them instead), when the text is
-empty, unchanged with no picture, or holds an @ (the editor turns it into a mention picker), or when
-pictures are given and the text does not end "Before and after:". After an edit of a FIX note, run
-figma_post.py fixnote to stamp it. When a drafts file is configured (drafts_store.py), the EDIT draft
-the edit used leaves it.
+empty, unchanged with no picture, or holds an @ (the editor turns it into a mention picker), when it
+keeps a wrapped quote's line breaks (drafts_store.wrapped_refusal; the same words with other line
+breaks count as a change, since Figma shows every break), or when pictures are given and the text
+does not end "Before and after:". After an edit of a FIX note, run figma_post.py fixnote to stamp
+it. When a drafts file is configured (drafts_store.py), the EDIT draft the edit used leaves it.
 
 WHY. A FIX note's before/after picture goes in the comment itself, attached every time in the
 browser rather than handed back as a manual step. REST takes message, comment_id and client_meta
@@ -78,10 +96,14 @@ BLIND TO what the pictures show: it counts attached images, not which ones, so t
 N", not "these N". It cannot tell a right comment id from a wrong one that also ends "Before and
 after:" and holds no pictures; the caller's id is trusted. The sign-in check reads the
 page (fields, a picker's text), so a sign-in page it has never seen reads as "still loading" until
-the minute is up, and then waits for you. Figma's comment UI selectors (aria-labels such as "Comment
-actions") are read off the live page and break when Figma changes it: `probe` is the check.
+the minute is up, and then waits for you. `resolve` finds the open thread by the first 60
+characters of its root's text, so two threads that open the same way cannot be told apart (it
+stops, nothing clicked); it does not read the thread first, so whether the thread is done is the
+caller's call; and a thread resolved by someone else during the run reads as one more change to look
+at, not as this tool's. Figma's comment UI selectors (aria-labels such as "Comment actions", "Mark as
+resolved") are read off the live page and break when Figma changes it: `probe` is the check.
 """
-import contextlib, json, os, re, shutil, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
+import contextlib, io, json, os, re, shutil, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
 
 API = "/v1"   # a Figma REST path; _get sends it through figma_client.py
 LABEL = "Before and after:"
@@ -92,6 +114,8 @@ KINDS = (".jpg", ".jpeg", ".png", ".gif")
 MAX_PICTURES = 5          # the editor's file input: "Upload up to 5 images and GIFs"
 EMAIL_WAIT = 60           # seconds after the email for single sign-on to come back
 EDIT_WAIT = 90            # seconds for the file and its comment thread to load once signed in
+RESOLVE_PAGE_WAIT = 15    # seconds for the open thread's header to read "Mark as unresolved" after the click
+RESOLVE_API_WAIT = 20     # seconds for REST to show resolved_at once the browser is gone
 
 
 def _get(path):
@@ -112,10 +136,11 @@ def norm(s):
 
 
 def face(s):
-    """Text as the page shows it: norm(), less every "@". A mention chip reads "Last, First" in the
-    thread and the editor while REST's plain text reads "@Last, First", so a match must drop the @ on
-    both sides."""
-    return re.sub(r"\s+", " ", norm(s).replace("@", "")).strip()
+    """Text as the page shows it: norm(), less every "@" and every list marker. A mention chip reads
+    "Last, First" in the thread and the editor while REST's plain text reads "@Last, First", so a
+    match must drop the @ on both sides. A list item reads without its "* " or "1. " on the page,
+    which draws the marker, so a root that holds a list is otherwise never found."""
+    return re.sub(r"\s+", " ", norm(LIST_MARK.sub("", s or "")).replace("@", "")).strip()
 
 
 def refusal(comment, me_id, pictures, stamped=(), again=False):
@@ -169,7 +194,16 @@ def edit_refusal(comment, me_id, text, pictures, replies, stamped=(), replace=Fa
         return "REFUSED: the new text is empty."
     if "@" in new:
         return "REFUSED: the new text holds an @, which the editor turns into a mention picker. Type a mention by hand."
-    if new == norm(comment.get("message")) and not pictures:
+    try:
+        import drafts_store
+        wrapped = drafts_store.wrapped_refusal(text)
+    except ImportError:
+        wrapped = None
+    if wrapped:
+        return wrapped
+    # The same words with other line breaks is a change: Figma shows every break (a reflow).
+    if new == norm(comment.get("message")) and not pictures \
+            and text.strip().count("\n") == (comment.get("message") or "").strip().count("\n"):
         return "REFUSED: the new text is the comment's text already, and no picture is given. Nothing to do."
     if pictures and not new.endswith(LABEL):
         return f"REFUSED: pictures go after \"{LABEL}\", and the new text does not end with it."
@@ -184,10 +218,16 @@ def editor_matches(editor_text, message):
     return e.endswith(LABEL) and len(e) >= 20 and e[:80] == m[:80]
 
 
+# A line's list marker. The editor draws a numbered or bulleted line as a list item, whose number is
+# not in its text, while REST keeps "1. ", so an edit of a numbered comment is otherwise refused.
+LIST_MARK = re.compile(r"(?m)^[ \t]*(?:\d+[.)]|[*•\-])[ \t]+")
+
+
 def editor_holds(editor_text, message):
     """True when the open editor holds this comment's text, label or not: `edit` opens comments that
-    predate the label (an older FIX note may end "Please confirm and resolve.")."""
-    e, m = face(editor_text), face(message)
+    predate the label (an older FIX note may end "Please confirm and resolve."). List markers are
+    left out on both sides."""
+    e, m = face(LIST_MARK.sub("", editor_text or "")), face(LIST_MARK.sub("", message or ""))
     return len(e) >= 20 and e[:80] == m[:80]
 
 
@@ -590,26 +630,6 @@ def figma_session(url, email, wait_user):
                                      wait_user=wait_user)
 
 
-def in_browser(url, email, wait_user, step):
-    """Open `url` in one signed-in browser, run step(page) and return its exit code; 2 when the browser
-    or the sign-in did not get that far. For more than one step use run_jobs, which keeps one browser
-    for all of them."""
-    import signed_in_browser
-    from playwright.sync_api import Error as PlaywrightError
-    try:
-        with figma_session(url, email, wait_user) as s:
-            try:
-                return step(s.page)
-            except PlaywrightError as e:
-                return _failed(s.page, e)
-    except signed_in_browser.NotReady as e:
-        print(f"DID NOT RUN: {e}.")
-        return 2
-    except ImportError:
-        print("DID NOT RUN: Playwright is not installed for this Python (pip install playwright).")
-        return 2
-
-
 # --- mentions ------------------------------------------------------------------------------------
 # REST posts "@Last, First" as plain text and notifies nobody, and the Plugin API and the MCP have no
 # comments at all. The web editor turns a picked name into a mention chip, and a chip added by an
@@ -825,11 +845,185 @@ def wait_for_comment(pg, comment, secs=EDIT_WAIT):
     return False
 
 
+# --- resolve ----------------------------------------------------------------------------------------
+# REST has no resolve (POST and DELETE only), so it is the open thread's header checkmark. Read off a
+# live file: the open thread is a region labelled "Currently expanded comment thread...", its header
+# holds Thread actions, "Mark as resolved" and Close comment, and a resolved thread opened by link shows
+# "Mark as unresolved" there. The Comments panel draws a "Mark as resolved" on every card too, so
+# nothing outside the open thread's region is ever clicked. The thread can close on the click before
+# its header redraws, so a page that never shows "Mark as unresolved" opens the link again, and REST
+# decides either way.
+THREAD_REGION = '[role=region][aria-label^="Currently expanded comment thread"]'
+RESOLVE_BTN = 'button[aria-label="Mark as resolved"]'
+UNRESOLVE_BTN = 'button[aria-label="Mark as unresolved"]'
+
+
+def wait_for_thread(pg, comment, secs=EDIT_WAIT):
+    """True once the open thread holding this root's text shows (thread_target finds it, open or
+    resolved). A resolve waits on the region it acts on, not on wait_for_comment's "Comment actions"
+    lookup, which can find nothing on a teammate's thread whose text the open region holds."""
+    start = time.time()
+    while time.time() - start < secs:
+        try:
+            got = pg.evaluate(OPEN_THREADS, [THREAD_REGION, RESOLVE_BTN, UNRESOLVE_BTN])
+            if thread_target(got, comment["message"])[1]:
+                return True
+        except Exception:
+            pass
+        pg.wait_for_timeout(1000)
+    return False
+
+
+# Each open thread region: its text and how many of each control its header holds.
+OPEN_THREADS = """([region, resolve, unresolve]) => [...document.querySelectorAll(region)].map(r => ({
+  text: r.innerText || '', resolve: r.querySelectorAll(resolve).length, unresolve: r.querySelectorAll(unresolve).length}))"""
+
+
+def resolve_refusal(comment, comments, me_id):
+    """Refusal text or None for resolving the thread `comment` is the root of, from the API's view of
+    the file's comments. No browser."""
+    if comment is None:
+        return "REFUSED: that comment is not in this file."
+    cid = comment.get("id")
+    if comment.get("parent_id"):
+        return (f"REFUSED: comment {cid} is a reply in thread {comment['parent_id']}. Resolve applies to a "
+                f"thread: give its root, {comment['parent_id']}.")
+    if comment.get("resolved_at"):
+        return f"REFUSED: thread {cid} is already resolved ({comment['resolved_at'][:16]}). Nothing to do."
+    if not face(comment.get("message")):
+        return (f"REFUSED: thread {cid} has no text, so the open thread cannot be told from another on the "
+                "page. Resolve it in the Figma UI.")
+    if not me_id:
+        return "REFUSED: GET /v1/me gave no id, so whose threads these are cannot be told."
+    thread = [comment] + [c for c in comments if c.get("parent_id") == cid]
+    last = max(thread, key=lambda c: c.get("created_at") or "")
+    root_by, last_by = comment.get("user") or {}, last.get("user") or {}
+    if root_by.get("id") != me_id and last_by.get("id") != me_id:
+        return (f"REFUSED: thread {cid} is {root_by.get('handle')}'s and {last_by.get('handle')} wrote its newest "
+                f"comment ({(last.get('created_at') or '')[:10]}). A thread a teammate is still discussing is "
+                "theirs to resolve; answer it instead.")
+    return None
+
+
+def resolve_jobs(key, cids):
+    """One resolve job per thread id, in the order given, each id once."""
+    jobs, seen = [], set()
+    for c in cids:
+        if str(c) not in seen:
+            seen.add(str(c))
+            jobs.append({"key": key, "cid": str(c), "resolve": True})
+    return jobs
+
+
+def resolve(key, cids, wait_user=180):
+    """Resolve each thread in `cids`, all in one browser, then read REST. Exit code: 0 every one
+    resolved over REST, 1 refused (nothing changed), 2 not all resolved."""
+    return run_jobs(resolve_jobs(key, cids), wait_user)[0]
+
+
+def thread_target(threads, message):
+    """(index, state, why) for the one open thread whose text holds `message`'s opening: state 'open'
+    (its header holds one "Mark as resolved") or 'resolved' (one "Mark as unresolved"), else None
+    with why."""
+    prefix = face(message)[:60]
+    hits = [i for i, t in enumerate(threads) if prefix and prefix in face(t.get("text"))]
+    if len(hits) != 1:
+        return None, None, f"{len(hits)} open thread(s) of {len(threads)} hold this comment's text; expected 1"
+    t = threads[hits[0]]
+    if t.get("unresolve") == 1 and not t.get("resolve"):
+        return hits[0], "resolved", None
+    if t.get("resolve") == 1 and not t.get("unresolve"):
+        return hits[0], "open", None
+    return None, None, (f"the open thread holds {t.get('resolve')} \"Mark as resolved\" and {t.get('unresolve')} "
+                        "\"Mark as unresolved\"; expected one of them")
+
+
+def resolve_thread(s, url, comment, wait=None):
+    """Click the open thread's own "Mark as resolved" and wait for its header to read "Mark as
+    unresolved", opening the link again if the thread closed. 0 shown resolved, 2 a control was
+    missing or the page never showed it. REST decides afterwards either way."""
+    pg, cid = s.page, comment["id"]
+    wait = RESOLVE_PAGE_WAIT if wait is None else wait
+    os.makedirs(PROOF, exist_ok=True)
+    shot = os.path.join(PROOF, f"{cid}-resolve.png")
+
+    def look():
+        return thread_target(pg.evaluate(OPEN_THREADS, [THREAD_REGION, RESOLVE_BTN, UNRESOLVE_BTN]), comment["message"])
+    i, state, why = look()
+    if state != "open":
+        pg.screenshot(path=shot)
+        if state == "resolved":
+            print(f"  {cid}: the thread already shows as resolved; nothing clicked. Screenshot: {shot}")
+            return 0
+        print(f"DID NOT RUN on {cid}: {why}; nothing clicked. Screenshot: {shot}")
+        return 2
+    pg.locator(THREAD_REGION).nth(i).locator(RESOLVE_BTN).click(timeout=10000)
+    how, start = "its header now reads \"Mark as unresolved\"", time.time()
+    while state != "resolved" and time.time() - start < wait:
+        pg.wait_for_timeout(500)
+        _, state, why = look()
+    if state != "resolved":
+        s.goto(url)                       # the thread may close on resolve: open it again and read it there
+        if wait_for_thread(pg, comment):
+            _, state, why = look()
+            how = "opened again, its header reads \"Mark as unresolved\""
+    pg.screenshot(path=shot)
+    if state != "resolved":
+        print(f"DID NOT SHOW RESOLVED on {cid}: clicked \"Mark as resolved\", but {why or 'the thread never showed as resolved'}. "
+              f"Screenshot: {shot}")
+        return 2
+    print(f"  {cid}: clicked the open thread's \"Mark as resolved\"; {how}. Screenshot: {shot}")
+    return 0
+
+
+def _check_resolves(jobs, res, read, before, sleep=time.sleep):
+    """Over REST, once the browser is gone: resolved_at for every resolve job, whatever its browser
+    step returned (a click can land though the page never showed it), printed as RESOLVED or NOT
+    RESOLVED per id. Updates `res`. Returns 2 when another thread in those files turned resolved
+    during the run, which nobody asked for (the click may have landed there), else 0."""
+    idx = [i for i, j in enumerate(jobs) if j.get("resolve")]
+    if not idx:
+        return 0
+    keys = sorted({jobs[i]["key"] for i in idx})
+    now, start = {}, time.time()
+    while True:
+        for k in keys:
+            got = read(k)[0]
+            if got is not None:
+                now[k] = {c["id"]: c for c in got}
+        if all((now.get(jobs[i]["key"], {}).get(jobs[i]["cid"]) or {}).get("resolved_at") for i in idx) \
+                or time.time() - start >= RESOLVE_API_WAIT:
+            break
+        sleep(2)
+    for i in idx:
+        j = jobs[i]
+        c = now.get(j["key"], {}).get(j["cid"])
+        if c and c.get("resolved_at"):
+            print(f"RESOLVED {j['cid']}: REST resolved_at {c['resolved_at']}"
+                  + ("" if res[i] == 0 else "; the page did not show it, the API does") + ".")
+            res[i] = 0
+            continue
+        why = ("the API read failed" if j["key"] not in now else "the comment is no longer in the file" if c is None
+               else f"REST resolved_at is still empty {RESOLVE_API_WAIT}s after the browser closed"
+               + ("" if res[i] == 0 else "; the browser step did not finish, see above"))
+        print(f"NOT RESOLVED {j['cid']}: {why}.")
+        res[i] = 2
+    asked, stray = {(jobs[i]["key"], jobs[i]["cid"]) for i in idx}, 0
+    for k in keys:
+        was = {c["id"]: c for c in before.get(k) or []}
+        for cid, c in (now.get(k) or {}).items():
+            if (k, cid) not in asked and c.get("resolved_at") and cid in was and not was[cid].get("resolved_at"):
+                print(f"ALSO RESOLVED during this run, not asked for: thread {cid} ({(c.get('user') or {}).get('handle')}'s, "
+                      f"{c['resolved_at']}). Someone else may have resolved it, or the click landed there; look at it.")
+                stray = 2
+    return stray
+
+
 # --- one browser for every browser step of a batch ---------------------------------------------------
 
 def job_refusal(job, comments, me_id, stamps):
     """Refusal text or None for one job, from the API's view. No browser. A job is a dict: key, cid,
-    and one of: pictures (attach), text (+ pictures, replace: edit), mentions (handles), probe."""
+    and one of: pictures (attach), text (+ pictures, replace: edit), mentions (handles), resolve, probe."""
     cid = str(job["cid"])
     by_id = {c["id"]: c for c in comments}
     comment = by_id.get(cid)
@@ -837,6 +1031,8 @@ def job_refusal(job, comments, me_id, stamps):
     stamped = [n for _, names in stamps.get(job["key"], {}).get(cid, []) for n in names]
     if job.get("probe"):
         return None if comment else "REFUSED: that comment is not in this file."
+    if job.get("resolve"):
+        return resolve_refusal(comment, comments, me_id)
     if "text" in job:
         return edit_refusal(comment, me_id, job["text"], job.get("pictures", []), replies, stamped,
                             job.get("replace", False))
@@ -886,7 +1082,7 @@ def run_jobs(jobs, wait_user=180, session=None, read=None):
                 try:
                     if i:
                         s.goto(url)
-                    if not wait_for_comment(s.page, comment):
+                    if not (wait_for_thread if j.get("resolve") else wait_for_comment)(s.page, comment):
                         print(f"DID NOT RUN on {j['cid']}: the thread did not show this comment within {EDIT_WAIT}s.")
                         continue
                     if j.get("probe"):
@@ -898,6 +1094,8 @@ def run_jobs(jobs, wait_user=180, session=None, read=None):
                                 cancel()
                                 print(f"  {j['cid']}: probe: the thread loaded and its editor opened; cancelled.")
                             res[i] = code
+                    elif j.get("resolve"):
+                        res[i] = resolve_thread(s, url, comment)
                     elif "text" in j:
                         res[i] = edit_text(s.page, comment, j["text"], j["pictures"], j.get("replace", False))
                         res[i] = res[i] or saved_view_refusal(s, url, j["text"], j["cid"])
@@ -910,9 +1108,13 @@ def run_jobs(jobs, wait_user=180, session=None, read=None):
                     res[i] = _failed(s.page, e, f"{j['cid']}-failed")
     except signed_in_browser.NotReady as e:
         print(f"DID NOT RUN: {e}.")
+        for j in jobs:
+            if j.get("resolve"):
+                print(f"NOT RESOLVED {j['cid']}: the browser did not get to it, so nothing was clicked.")
         return 2, {j["cid"]: 2 for j in jobs}
     print(f"  one browser for {len(jobs)} job(s): {signed_in_browser.LAUNCHES - launches} launch(es).")
-    worst = _check_jobs(jobs, res, read)
+    stray = _check_resolves(jobs, res, read, {k: v[0] for k, v in views.items()})
+    worst = max(_check_jobs(jobs, res, read), stray)
     codes = {}
     for j, r in zip(jobs, res):
         codes[j["cid"]] = max(codes.get(j["cid"], 0), r)
@@ -979,7 +1181,7 @@ def _check_jobs(jobs, res, read, wait_api=20):
     """Over REST, after the browser closed: stamp attached pictures, check an edit's saved text, and
     check each mention is a chip. Updates `res` (one result per job) and returns the worst."""
     for i, j in enumerate(jobs):
-        if res[i] != 0 or j.get("probe"):
+        if res[i] != 0 or j.get("probe") or j.get("resolve"):     # _check_resolves reads those
             continue
         if j["pictures"] and "text" not in j:
             _stamp(j["key"], j["cid"], j["pictures"])
@@ -1146,6 +1348,12 @@ def selftest():
     case("edit: empty text: refused", "empty" in (edit_refusal(old, "me", "  \n ", [], 0) or ""))
     case("edit: text with an @: refused", "mention" in (edit_refusal(old, "me", new.replace("crop", "@crop"), [], 0) or ""))
     case("edit: the same text and no picture: refused", "Nothing to do" in (edit_refusal(old, "me", old["message"], [], 0) or ""))
+    wrapped_old = dict(old, message="FIX (done in Figma): These cards are 450 tall now, on desktop and phone, so\n"
+                                    "the longest title fits on two lines.\n\nBefore and after:")
+    case("edit: the same words with the wrapping taken out: passes",
+         edit_refusal(wrapped_old, "me", wrapped_old["message"].replace("so\nthe", "so the"), [], 0) is None)
+    case("edit: a new text that keeps a quote's wrapping: refused",
+         "mid-paragraph" in (edit_refusal(old, "me", wrapped_old["message"] + " More.", [], 0) or ""))
     case("edit: a picture but no closing label: refused", LABEL in (edit_refusal(old, "me", old["message"] + " More.", [pic], 0) or ""))
     case("edit: six pictures: refused", edit_refusal(old, "me", new, [pic] * 6, 0) is not None)
     case("edit: a picture already stamped on the comment: refused", "--again" in (edit_refusal(old, "me", new, [pic], 0, ["sheet.jpg"]) or ""))
@@ -1155,6 +1363,13 @@ def selftest():
     case("edit: a comment not in the file: refused", edit_refusal(None, "me", new, [], 0) is not None)
     case("edit: the editor of a comment with no label is found by its text", editor_holds(old["message"], old["message"]))
     case("edit: another comment's editor is not", not editor_holds("FIX (done in Figma): the badge. Please confirm.", old["message"]))
+    listed = ("FIX (done in Figma): Every photo card now follows this set.\n1. The card descriptions use "
+              "text/secondary, set once in the card component.\n2. The gradients end at the bottom edge.")
+    case("edit: a numbered comment's editor, which draws the list without its numbers, is found",
+         editor_holds(listed.replace("1. ", "").replace("2. ", ""), listed))
+    case("edit: a numbered comment's editor with the numbers typed in is found", editor_holds(listed, listed))
+    case("edit: a different numbered comment is not",
+         not editor_holds(listed.replace("Every photo card", "Every hero card"), listed))
     case("edit: paragraphs split on a blank line, lines kept",
          paragraphs("A one.\n\nB two\nB three.\n\n\nBefore and after:") == [["A one."], ["B two", "B three."], ["Before and after:"]])
 
@@ -1200,11 +1415,72 @@ def selftest():
     case("mention job: a handle the text does not hold refuses", mention_refusal(posted, "me", ["Berg, Tomas"], 0) is not None)
     case("mention job: someone else's comment refuses", mention_refusal(dict(posted, user={"id": "x"}), "me", ["Rivera, Ana"], 0) is not None)
 
+    # Resolve. A planted dump in REST's own shape: a root's parent_id is "", and only a root carries
+    # resolved_at (on a live file, no reply did).
+    me_u, mate = {"id": "me", "handle": "Owner"}, {"id": "t1", "handle": "Designer"}
+
+    def cm(i, by, msg, at, parent="", resolved=None):
+        return {"id": i, "parent_id": parent, "user": by, "message": msg, "created_at": at,
+                "resolved_at": resolved, "client_meta": {"node_id": "1:2"}}
+    dump = [cm("40", me_u, "Header: the light header comes with the nav redesign.", "2026-08-13T21:56:08Z"),
+            cm("41", me_u, "This one's closed out.", "2026-08-28T19:48:23Z", parent="40"),
+            cm("42", mate, "Q: should this band be 120 tall?", "2026-10-20T10:00:00Z"),
+            cm("43", mate, "And the phone one too?", "2026-10-21T10:00:00Z", parent="42"),
+            cm("44", mate, "Q: is this copy final?", "2026-10-20T11:00:00Z"),
+            cm("45", me_u, "Yes, it shipped.", "2026-10-22T09:00:00Z", parent="44"),
+            cm("46", me_u, "FIX (done in Figma): the crop.", "2026-10-20T12:00:00Z"),
+            cm("47", mate, "Looks right, one question on the phone crop.", "2026-10-23T12:00:00Z", parent="46"),
+            cm("48", me_u, "Q: which header is current?", "2026-09-01T00:00:00Z", resolved="2026-09-02T00:00:00Z"),
+            cm("49", me_u, "", "2026-10-01T00:00:00Z")]
+    rv = {c["id"]: c for c in dump}
+    rr = lambda cid, me="me": resolve_refusal(rv.get(cid), dump, me)
+    case("resolve: an id not in the file: refused", "not in this file" in (rr("99") or ""))
+    case("resolve: a reply's id: refused, naming its thread's root", "give its root, 40" in (rr("41") or ""))
+    case("resolve: a thread already resolved: refused", "already resolved" in (rr("48") or ""))
+    case("resolve: a teammate's thread a teammate wrote last in: refused", "theirs to resolve" in (rr("42") or ""))
+    case("resolve: a root with no text to find it by: refused", "no text" in (rr("49") or ""))
+    case("resolve: no token owner id: refused", "/v1/me" in (rr("40", me=None) or ""))
+    case("resolve: the owner's thread the owner wrote last in: passes", rr("40") is None)
+    case("resolve: a teammate's thread the owner answered last (a moot one): passes", rr("44") is None)
+    case("resolve: the owner's own thread a teammate wrote last in: passes", rr("46") is None)
+    case("resolve: the job list holds one job per id, in order, each id once",
+         resolve_jobs("K", ["40", "44", "40", 46]) == [{"key": "K", "cid": c, "resolve": True} for c in ("40", "44", "46")])
+    regions = [{"text": "Comment\nOwner\n2 months ago\nHeader: the light header comes with the nav\n"
+                        "redesign.\nThis one's closed out.", "resolve": 1, "unresolve": 0},
+               {"text": "Comment\nOwner\nQ: is this copy final?\nYes, it shipped.", "resolve": 1, "unresolve": 0}]
+    case("resolve page: the open thread holding the root's text is the one clicked, not another",
+         thread_target(regions, rv["40"]["message"])[:2] == (0, "open")
+         and thread_target(regions, rv["44"]["message"])[:2] == (1, "open"))
+    case("resolve page: no open thread holds the text: nothing clicked", thread_target(regions[1:], rv["40"]["message"])[1] is None)
+    case("resolve page: a header reading \"Mark as unresolved\" shows the thread resolved",
+         thread_target([dict(regions[0], resolve=0, unresolve=1)], rv["40"]["message"])[1] == "resolved")
+    case("resolve page: an open thread with no resolve control: nothing clicked",
+         thread_target([dict(regions[0], resolve=0)], rv["40"]["message"])[1] is None)
+    listed = {"id": "50", "message": "live on the branch:\n* Container: 1376 max-width + 32px side margins."}
+    shown = [{"text": "Comment\nOwner\nlive on the branch: \nContainer: 1376 max-width + 32px side margins.",
+              "resolve": 1, "unresolve": 0}]
+    case("resolve page: a root whose list marker the page draws as a bullet is still found",
+         thread_target(shown, listed["message"])[1] == "open")
+
+    class _Pg:                      # a page that shows the open thread on its third look
+        def __init__(self, regions):
+            self.n, self.regions = 0, regions
+
+        def evaluate(self, js, args):
+            self.n += 1
+            return self.regions if self.n >= 3 else []
+
+        def wait_for_timeout(self, ms):
+            pass
+    case("resolve wait: returns once the open thread holding the root shows, whoever wrote it",
+         wait_for_thread(_Pg(shown), listed, secs=5) is True)
+    case("resolve wait: a page that never shows it gives up", wait_for_thread(_Pg([]), listed, secs=0.01) is False)
+
     # One browser per batch. A stub session counts launches the way signed_in_browser does; the steps
     # are stubbed, so this checks the batch's shape, not Figma's page.
     import signed_in_browser
     saved = {n: globals()[n] for n in ("edit_and_attach", "add_mentions", "wait_for_comment", "_stamp",
-                                       "saved_view_refusal")}
+                                       "saved_view_refusal", "resolve_thread", "RESOLVE_API_WAIT", "wait_for_thread")}
     c1, c2, c3 = (dict(mine, id=i) for i in ("21", "22", "23"))
     c3["message"] = "Q: @Rivera, Ana which is current?"
     view = ([c1, c2, c3], {"id": "me", "email": "a@b.c"})
@@ -1221,7 +1497,8 @@ def selftest():
     try:
         globals().update(edit_and_attach=lambda pg, c, p, a=False: steps.append(("attach", c["id"])) or 0,
                          add_mentions=lambda pg, c, h: steps.append(("mention", c["id"])) or 0,
-                         wait_for_comment=lambda pg, c, secs=0: True, _stamp=lambda *a: None,
+                         wait_for_comment=lambda pg, c, secs=0: True, wait_for_thread=lambda pg, c, secs=0: True,
+                         _stamp=lambda *a: None,
                          saved_view_refusal=lambda s, u, e, c: 0)
         reads = lambda key, md=False: (view[0] if not md else [dict(c3, message="Q: Rivera, Ana which is current?")]
                                        + [c1, c2], view[1])
@@ -1264,6 +1541,61 @@ def selftest():
         typed = lambda key, md=False: (view[0], view[1])     # markdown keeps the @: no chip
         code, codes = run_jobs(jobs[2:], session=fake_session, read=typed)
         case("batch: a mention the API still shows as typed text fails the check", code == 2 and codes["23"] == 2)
+
+        # Resolve in the batch's one browser, the page step stubbed; REST read first as `dump`, then as
+        # resolved for the ids given.
+        page = {}
+        globals().update(resolve_thread=lambda s, u, c, wait=None: steps.append(("resolve", c["id"])) or page.get(c["id"], 0),
+                         RESOLVE_API_WAIT=0)
+
+        def seq(*ids):
+            calls = []
+
+            def read(key, md=False):
+                calls.append(key)
+                done = set(ids) if len(calls) > 1 else set()
+                return [dict(c, resolved_at="2026-10-26T03:00:00Z") if c["id"] in done else c for c in dump], view[1]
+            return read
+
+        def run(cids, read, sess=fake_session):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                got = run_jobs(resolve_jobs("K", cids), session=sess, read=read)
+            return got + (out.getvalue(),)
+        before, steps[:], opened[:] = signed_in_browser.LAUNCHES, [], []
+        code, codes, out = run(["40", "44", "46"], seq("40", "44", "46"))
+        case("resolve: 3 threads in ONE browser, each opened once, and REST shows all 3 resolved: exit 0",
+             code == 0 and signed_in_browser.LAUNCHES - before == 1 and len(opened) == 3
+             and steps == [("resolve", c) for c in ("40", "44", "46")]
+             and all(f"RESOLVED {c}: REST resolved_at" in out for c in ("40", "44", "46")))
+        globals()["wait_for_comment"] = lambda pg, c, secs=0: False    # the edit step's lookup finds nothing
+        steps[:] = []
+        code, codes, out = run(["44"], seq("44"))
+        case("resolve: waits on the open thread, not the edit step's lookup (a teammate's thread)",
+             steps == [("resolve", "44")])
+        globals()["wait_for_comment"] = lambda pg, c, secs=0: True
+        code, codes, out = run(["40", "44", "46"], seq("40", "44"))
+        case("resolve: one thread REST still shows open fails, by id, and the others pass",
+             code == 2 and codes == {"40": 0, "44": 0, "46": 2} and "NOT RESOLVED 46:" in out)
+        code, codes, out = run(["40", "44"], seq("40", "44", "42"))
+        case("resolve: another thread turning resolved during the run is named and fails the run",
+             code == 2 and "ALSO RESOLVED" in out and "thread 42" in out)
+        before, steps[:] = signed_in_browser.LAUNCHES, []
+        code, codes, out = run(["40", "42"], seq("40"))
+        case("resolve: one refused id refuses them all, with no browser opened and nothing clicked",
+             code == 1 and signed_in_browser.LAUNCHES == before and steps == [] and "theirs to resolve" in out)
+        page["44"] = 2
+        code, codes, out = run(["40", "44"], seq("40", "44"))
+        case("resolve: a page that never showed it resolved is still RESOLVED when REST shows resolved_at",
+             code == 0 and "RESOLVED 44: REST resolved_at" in out and "the page did not show it" in out)
+
+        @contextlib.contextmanager
+        def no_sign_in(url, email, wait):
+            raise signed_in_browser.NotReady("the sign-in was not finished")
+            yield
+        code, codes, out = run(["40"], seq("40"), sess=no_sign_in)
+        case("resolve: a sign-in that never finished prints NOT RESOLVED with nothing clicked",
+             code == 2 and "NOT RESOLVED 40: the browser did not get to it" in out)
     finally:
         globals().update(saved)
     shutil.rmtree(td, ignore_errors=True)
@@ -1301,6 +1633,14 @@ if __name__ == "__main__":
         sys.exit(edit(rest[0], rest[1], text, rest[2:], wait_user=wait, replace=replace))
     if args[0] == "mention" and len(args) >= 3:
         sys.exit(mention(args[1], args[2:]))
+    if args[0] == "resolve" and len(args) >= 3:
+        rest, wait = list(args[1:]), 180
+        if "--wait-user" in rest:
+            i = rest.index("--wait-user")
+            wait = int(rest[i + 1])
+            del rest[i:i + 2]
+        if len(rest) >= 2:
+            sys.exit(resolve(rest[0], rest[1:], wait_user=wait))
     if args[0] == "probe" and len(args) >= 3:
         rest, who = list(args[1:]), None
         if "--picker" in rest:

@@ -1,13 +1,13 @@
 #!/usr/bin/env python
-"""figma_post.py - the WRITE half of figma_comments.py.
+"""figma_post.py - the write half of figma_comments.py.
 
 figma_comments.py is deliberately read-only: inbox / nodes / check / frame / search. It is the gate
-you run BEFORE writing. This is the write, kept in a separate file so the gate cannot be bypassed by
+you run before writing. This is the write, kept in a separate file so the gate cannot be bypassed by
 accident - you have to reach for a different command.
 
     reply   <file_key> <comment_id> <text> [--own-last-ok] [--multi-ok] [--repost-ok]
             [--edited <id>,<id>... --picture <file.jpg> --separate <id>,<id>... --cause <slug>]
-                                              reply INTO an existing thread
+                                              reply into an existing thread
     new     <file_key> <node_id> <text> [--separate <id>,<id>...] [--pin-ok] [--multi-ok] [--repost-ok]
             [--edited <id>,<id>... --picture <file.jpg> --cause <slug> [--new-cause]]
                                               start a thread pinned to a node
@@ -26,14 +26,14 @@ accident - you have to reach for a different command.
 THE ONE RULE THIS FILE ENFORCES. `new` and `reply` refuse unless `figma_comments.py frame` printed
 the anchor node in the last 30 minutes. For a reply the anchor is the thread's root node. A read that
 sees only the base text style and the first SOLID fill produces comments asking design for things
-the mock already has (FOURTH FAILURE in figma_comments.py). `frame` prints both, and this refusal
-makes running it the only way to post. A thread pinned to the canvas rather than a node has nothing
-to read, so it is refused too: post that one from the Figma UI.
+the mock already has (FOURTH FAILURE in figma_comments.py, in cmd_frame). `frame` prints both, and
+this refusal makes running it the only way to post. A thread pinned to the canvas rather than a node
+has nothing to read, so it is refused too: post that one from the Figma UI.
 
 THE SECOND RULE, `new` only. It also refuses unless `figma_comments.py search` read every comment on
 the file in the last 30 minutes. A comment about one frame often belongs as a reply in an open
-thread on a different node (SIXTH FAILURE in figma_comments.py). Whether the hits are on the same
-subject is judgement; that a search ran is not.
+thread on a different node (OTHER NODES, SAME SUBJECT in figma_comments.py). Whether the hits are on
+the same subject is judgement; that a search ran is not.
 
 THE THIRD RULE, `new` and `reply`. `frame` stamps each node with a hash of the frame it read, and the
 post re-fetches that frame and refuses if the hash moved. A reply queued from a read made earlier in
@@ -43,7 +43,7 @@ that Figma still looks like it. Figma is re-read at post time, every time.
 THE FOURTH RULE, `new` only. It refuses while an open thread sits on the same layer of any copy of
 the node's component, on any page (figma_family.py), unless --separate lists every one of them. A
 search on other words passes THE SECOND RULE and still misses the same question asked on another
-copy of the component (NINTH FAILURE in figma_comments.py). --separate says each listed thread was
+copy of the component (OTHER COPIES in figma_comments.py). --separate says each listed thread was
 read and is about something else. When the family check cannot run (no index, and building one
 failed), `new` refuses too.
 
@@ -77,7 +77,7 @@ for one thread inside any one of the components, the others named in its text. E
 passes is stamped in FIXNOTES; `fixnote` runs the
 same check for a comment edited with figma_attach.py edit (REST cannot edit) and stamps it.
 
-THE NINTH RULE, `new`, `reply` and `fixnote`. Every FIX note carries its before/after picture IN
+THE NINTH RULE, `new`, `reply` and `fixnote`. Every FIX note carries its before/after picture in
 the comment, after the closing "Before and after:" line, and the text says in words what each thing
 was before. A REST comment cannot carry an image (POST takes message, comment_id and client_meta
 only), so `new` and `reply` need --picture, the file figma_evidence.py sheet made (Figma before the
@@ -156,7 +156,7 @@ Text copied from a wrapped quote in the drafts file, with a line break mid-parag
 attached, not only a FIX note's, and the text gets the "Before and after:" label it goes after.
 
 RULES THIS FILE DOES NOT ENFORCE, because they need judgement:
-  - If `search` or `nodes` shows an open thread on the subject, REPLY in it.
+  - If `search` or `nodes` shows an open thread on the subject, reply in it.
   - Two or three sentences per comment; THE ELEVENTH RULE counts only the questions. No node tables,
     no hex dumps.
   - Name the thing (page, section, component), not a bare node id.
@@ -803,24 +803,6 @@ def attach_note(key, cid, node, picture):
             f"attach an image): https://www.figma.com/design/{key}/File?node-id={_norm(node).replace(':', '-')}#{cid}")
 
 
-def attach_after(key, cid, thread_id, node, picture, attacher=None):
-    """Attach the picture to the comment just posted, in the browser (figma_attach.py), every time,
-    rather than handing the step back. Prints the manual step only when it did not attach.
-    Returns figma_attach's exit code, or 2 when it could not be imported."""
-    if attacher is None:
-        try:
-            import figma_attach
-            attacher = figma_attach.attach
-        except ImportError as e:
-            print(f"  DID NOT ATTACH: figma_attach.py is not beside figma_post.py ({e}).")
-            print(attach_note(key, thread_id, node, picture))
-            return 2
-    code = attacher(key, cid, pictures_of(picture))
-    if code != 0:
-        print(attach_note(key, thread_id, node, picture))
-    return code
-
-
 def record_fixnote(key, thread_id, edited, anchor_id, now=None):
     """Stamp a thread's FIX note as placement-checked. Atomic write."""
     now = time.time() if now is None else now
@@ -1464,21 +1446,7 @@ def selftest():
         case("two pictures, comma-separated: posts", picture_gate(fix, picture=f"{pic},{pic}"), False)
         case("two pictures, one not a picture file: refused", picture_gate(fix, picture=f"{pic},{pic}.txt"), True)
         case("six pictures: refused", picture_gate(fix, picture=",".join([pic] * 6)), True)
-        calls = []
-        def attacher(code):
-            return lambda k, c, ps: calls.append((k, c, ps)) or code
         import io, contextlib
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = attach_after("K", "r2", "r1", "1:2", f"{pic},{pic}", attacher(0))
-        case("after a post, the pictures go to figma_attach for the new comment, with no manual step printed",
-             None if code == 0 and calls[-1] == ("K", "r2", [pic, pic]) and "ATTACH" not in out.getvalue()
-             else (code, calls, out.getvalue()), False)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = attach_after("K", "r2", "r1", "1:2", pic, attacher(2))
-        case("when the attach did not run, the manual step is printed with the thread link",
-             None if code == 2 and "ATTACH" in out.getvalue() and "#r1" in out.getvalue() else out.getvalue(), False)
         case("fixnote text that links its picture: refused", picture_gate(linked, posting=False), True)
         case("fixnote text ending in the bare label, the picture attached by hand: stamps",
              picture_gate(fix + "\n\nBefore and after:", posting=False), False)

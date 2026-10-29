@@ -12,7 +12,7 @@ an agent, a memory card. Read it before editing one.
 | How to do one job | the skill or agent body | when that job runs |
 | Detail used in one step of a job | the skill's `references/` or the tool's `--help` | when that step runs |
 | Anything with one mechanical right answer | code that refuses: a tool, a git hook, the project's check command, an ask rule | never read; it runs |
-| A fact Claude can't derive (who owns what, a past decision that still binds) | a memory card, the project rulings file, the tracker | on demand |
+| A fact Claude can't derive (who owns what, a past decision that still binds) | the one file your setup names for that kind of fact (a memory card, or a file for people, the machine or standing decisions), the project rulings file, the tracker | on demand |
 | Why a rule exists: the incident, the quote, the date, the measurement | git log, an archive folder, the gate records | never as an instruction |
 
 Put each line where it belongs. Don't copy it into a second home; point to the first.
@@ -46,17 +46,20 @@ past a limit means removing or merging one.
   calling skill's step, not here.
 - An agent body: at most 600 words, and no HTML comments (provenance goes in the record).
 - A skill's `SKILL.md` body: at most 5,000 tokens; the rest goes to `references/`.
+- To fit a limit, move tool detail (flags, output legends, recipes) to `references/` or the tool's
+  `--help` and merge repeated rules. Don't turn paragraphs into bullets or tables to save space.
 - Everything that loads in every session (the rules files, `MEMORY.md`, every skill and agent
   description): one total, capped by a limit that only ever moves down. A new line there replaces
-  an old one; moving a rule into a memory card doesn't make room.
+  an old one; moving a rule into an on-demand file makes room only when no step needs it every
+  session.
 
 ## A correction from the user
 
 When the user corrects you, fix the cause where it lives: the tool, the gate, or the one line of
 the skill that led you wrong. Don't add a new paragraph quoting the correction. If no line led you
-wrong, the fix may be a memory card holding the fact, not a rule. Write a new rule only after two
-independent occurrences; one incident is an anecdote. Edit a skill after the task in flight, not
-during it.
+wrong, the fix may be the fact in its on-demand home from the table above, not a rule. Write a new
+rule only after two independent occurrences; one incident is an anecdote. Edit a skill after the
+task in flight, not during it.
 
 ## Changing an instruction file
 
@@ -65,3 +68,6 @@ during it.
    or be dropped with a reason. Keep that list beside the backup.
 3. Run the file's own check when one exists: the agent's or skill's eval suite, the project's check
    command for repo files, and `tools/doclint.py` from the agent-workbench plugin for prose.
+
+A skill's `model:` line doesn't switch the model in headless `claude -p`, so don't add one expecting
+it to.

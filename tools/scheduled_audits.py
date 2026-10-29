@@ -11,12 +11,15 @@ parser breaks, or a check keeps failing against a structure nobody has any more,
 Run this daily from a scheduler (templates/launchd/ has a macOS example), so the record of what each
 audit returned builds up on its own.
 
-WHAT IT RUNS. The AUDITS list below: the workspace_audit.py checks, `memory_check.py all`,
-`skill_lint.py`, `agent_gate_stale.py`, `skill_use.py` and `tool_time.py --audit`, each with this
-tools folder as its working directory and its own timeout. Each reads and writes nothing (tool_time
-keeps its own flags file). `scheduled_audits.extra` in the agent-workbench config adds your own:
-a list of [name, script, args...] with the script in this folder, or [name, script, args..., true]
-to run it in a login shell (for a token that only a login shell loads).
+WHAT IT RUNS. The AUDITS list below: the workspace_audit.py checks, `skill_lint.py`,
+`agent_gate_stale.py`, `skill_use.py` and `tool_time.py --audit`, each with this tools folder as its
+working directory and its own timeout. Each reads and writes nothing (tool_time keeps its own flags
+file). `scheduled_audits.extra` in the agent-workbench config adds your own: a list of
+[name, script, args...] with the script in this folder, or [name, script, args..., true] to run it
+in a login shell (for a token that only a login shell loads). For example
+["figma pins", "figma_comments.py", "pins", "--new", "--lane", "batch", true] and the same with
+`stale` list your open Figma threads pinned to a deleted or hidden node, or quiet 45 days, each red
+once.
 An audit's output is kept only when its result is not 0 (see below).
 
 WHAT IT WRITES. One line per audit, appended to the log and fsynced as each audit finishes. The log
@@ -86,7 +89,6 @@ TIMEOUT = 600
 
 WORKSPACE_CHECKS = ("cites", "archive", "naming", "tools", "root", "xrefs", "map", "config")
 AUDITS = [(f"workspace_audit {c}", ["workspace_audit.py", c]) for c in WORKSPACE_CHECKS] + [
-    ("memory_check all", ["memory_check.py", "all"]),
     ("skill_lint", ["skill_lint.py"]),
     ("agent_gate_stale", ["agent_gate_stale.py"]),
     ("skill_use", ["skill_use.py"]),
@@ -592,7 +594,7 @@ def selftest():
         plists = os.path.join(t, "wd", "LaunchAgents")
         os.makedirs(plists)
         P = "local.me."
-        for label, extra in ((P + "serve", {"KeepAlive": True}), (P + "memory-index", {"StartInterval": 300}),
+        for label, extra in ((P + "serve", {"KeepAlive": True}), (P + "planted-exit", {"StartInterval": 300}),
                              (P + "daily", {"StartCalendarInterval": {"Hour": 8}}), ("com.other.thing", {"KeepAlive": True})):
             with open(os.path.join(plists, label + ".plist"), "wb") as f:
                 plistlib.dump({"Label": label, **extra}, f)
@@ -604,7 +606,7 @@ def selftest():
 
         def states(**over):
             base = {"serve": {"running": True, "last_exit": None},
-                    "memory_index": {"running": False, "last_exit": 0},
+                    "planted_exit": {"running": False, "last_exit": 0},
                     "daily": {"running": False, "last_exit": 1}}
             base.update(over)
             return lambda label: base.get(label.replace(P, "").replace("-", "_"))
@@ -613,7 +615,7 @@ def selftest():
 
         def wd(when, state=up, minutes=10):
             return watchdog_alert(wlog, got.append, at(when, minutes), state, mlog, plists, set, P,
-                                  (P + "memory-index",))
+                                  (P + "planted-exit",))
         p = wd(datetime.datetime(2026, 10, 20, 9, 0))
         check("watchdog: a log 49 hours old alerts",
               set(p) == {"daily-run"} and len(got) == 1 and "2026-10-18 08:00" in got[0])
@@ -627,12 +629,12 @@ def selftest():
         check("watchdog: a fresh log, a recent mirror, every agent loaded and a daily job that exited 1 is quiet",
               not p and len(got) == 2)
         p = wd(datetime.datetime(2026, 10, 21, 10, 0),
-               states(serve={"running": False, "last_exit": -9}, daily=None, memory_index={"running": False, "last_exit": 1}))
-        check("watchdog: a stopped keep-alive agent, an unloaded agent and memory-index exiting 1 each alert",
-              set(p) == {P + "serve", P + "daily", P + "memory-index"} and len(got) == 3
+               states(serve={"running": False, "last_exit": -9}, daily=None, planted_exit={"running": False, "last_exit": 1}))
+        check("watchdog: a stopped keep-alive agent, an unloaded agent and an exit_matters agent exiting 1 each alert",
+              set(p) == {P + "serve", P + "daily", P + "planted-exit"} and len(got) == 3
               and "serve is not running" in got[2] and "daily is not loaded" in got[2] and "last exited 1" in got[2])
         check("watchdog: only plists with the configured prefix are watched, and KeepAlive is read from each",
-              our_agents(plists, P) == {P + "daily": False, P + "memory-index": False, P + "serve": True})
+              our_agents(plists, P) == {P + "daily": False, P + "planted-exit": False, P + "serve": True})
         p = wd(datetime.datetime(2026, 10, 21, 10, 0), minutes=210)
         check("watchdog: a mirror log 210 minutes old alerts",
               set(p) == {"desktop-mirror"} and len(got) == 4 and "mirror has not run since 2026-10-21 06:30" in got[3])

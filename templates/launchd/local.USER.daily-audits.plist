@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Runs the log backup, then the daily audits (upkeep cleanup first, today.md last), at login and
-  every day at 08:00. macOS only.
+  Runs the log backup, the request ledger, the daily audits (upkeep cleanup first, today.md last)
+  and then the weekly metrics row (written once a week, by the first run on or after a Monday), at
+  login and every day at 08:00. macOS only.
 
   To use it:
     1. Replace every placeholder:
@@ -27,7 +28,7 @@
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>PYTHON TOOLS/backup_cc_logs.py; PYTHON TOOLS/ledger.py; PYTHON TOOLS/scheduled_audits.py</string>
+		<string>PYTHON TOOLS/backup_cc_logs.py; PYTHON TOOLS/ledger.py; PYTHON TOOLS/scheduled_audits.py; PYTHON TOOLS/weekly_metrics.py</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>TOOLS</string>

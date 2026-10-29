@@ -49,8 +49,8 @@ BLIND TO:
     the index age; `build` refreshes it.
   - Boxes are as of the build, not as of each comment. A moved layer takes its threads with it.
     Clipping and rotation are ignored, and so is a copy resized enough to move the layer.
-  - Subject. A same-layer thread can be about something else. Read it, as with SECOND FAILURE in
-    figma_comments.py.
+  - Subject. A same-layer thread can be about something else. Read it, as with SAME NODE, OTHER
+    SUBJECT in figma_comments.py.
 """
 import hashlib, json, os, pickle, re, sys, tempfile, time, urllib.error, urllib.request
 from collections import defaultdict
@@ -104,9 +104,10 @@ def _box(n):
     return (b["x"], b["y"], b["width"], b["height"]) if b and b.get("width") is not None else None
 
 
-def _walk(root, parent, page, hidden, idx, shape):
+def _walk(root, parent, page, hidden, idx, shape, text=None):
     """Add root and every layer under it to idx; put the shape of every big box-like node in
-    shape. Iterative, so a deep tree cannot hit the recursion limit."""
+    shape, and the words on every text-bearing layer (text, sticky, shape, table cell, code block)
+    in text. Iterative, so a deep tree cannot hit the recursion limit."""
     full, size = {}, {}
     stack = [(root, parent, hidden, False)]
     while stack:
@@ -116,6 +117,9 @@ def _walk(root, parent, page, hidden, idx, shape):
             h = hid or n.get("visible", True) is False
             idx[n["id"]] = (n["type"], n.get("name", ""), par, page or n["id"], _box(n),
                             n.get("componentId"), h)
+            words = n.get("characters") or n.get("code")
+            if text is not None and isinstance(words, str) and words.strip():
+                text[n["id"]] = words
             stack.append((n, par, hid, True))
             # Reversed, so siblings pop, and land in idx, in file order: bottom of the z-order first.
             stack.extend((k, n["id"], h, False) for k in reversed(kids))
@@ -132,10 +136,11 @@ def _walk(root, parent, page, hidden, idx, shape):
 
 
 def from_doc(doc):
-    """The index for one GET /files/<key> response."""
-    idx, shape = {}, {}
+    """The index for one GET /files/<key> response; text is the words on the canvas, for a search
+    over what a file says rather than only its comments."""
+    idx, shape, text = {}, {}, {}
     for page in doc["document"].get("children") or ():
-        _walk(page, None, page["id"], False, idx, shape)
+        _walk(page, None, page["id"], False, idx, shape, text)
     comps, sets = doc.get("components") or {}, doc.get("componentSets") or {}
     names = {}
     for k, c in comps.items():
@@ -148,7 +153,7 @@ def from_doc(doc):
     frame_of = {k: tuple(by_shape[h]) for k, h in shape.items()
                 if idx[k][T] == "FRAME" and h in by_shape}
     return {"idx": idx, "shape": shape, "by_shape": dict(by_shape), "frame_of": frame_of,
-            "names": names, "version": doc.get("version"), "lastModified": doc.get("lastModified"),
+            "names": names, "text": text, "version": doc.get("version"), "lastModified": doc.get("lastModified"),
             "built": time.time()}
 
 
@@ -196,7 +201,8 @@ def load(key, mode="auto", log=sys.stderr):
         except Exception as e:
             note = f"the cached index could not be read ({e.__class__.__name__})"
     age = (time.time() - data["built"]) / 3600 if data else None
-    if mode == "force" or (mode == "auto" and (data is None or age > MAX_AGE_H)):
+    # An index built before text was kept has no "text"; "auto" rebuilds it like a stale one.
+    if mode == "force" or (mode == "auto" and (data is None or age > MAX_AGE_H or "text" not in data)):
         try:
             data = build(key, log=log)
         except Exception as e:
@@ -217,6 +223,7 @@ class Index:
     def __init__(self, data):
         self.d = data
         self.idx = data["idx"]
+        self.text = data.get("text") or {}  # {node id: words}; empty in an index built before text was kept
         self.kids = defaultdict(list)
         self.inst = defaultdict(int)
         for k, v in self.idx.items():
@@ -492,7 +499,8 @@ def _planted():
         return dict(id=cid, type=typ, name=kw.pop("name", "footer"), absoluteBoundingBox=box(x, y, 300, 200),
                     children=layers(cid + "/", x, y), **kw)
 
-    small = [{"id": "s1", "type": "TEXT", "name": "Label"}, {"id": "s2", "type": "VECTOR", "name": "Icon"},
+    small = [{"id": "s1", "type": "TEXT", "name": "Label", "characters": "Planted build cost: $5.49 a build"},
+             {"id": "s2", "type": "VECTOR", "name": "Icon"},
              {"id": "s3", "type": "VECTOR", "name": "Icon 2"}]
     doc = {"document": {"id": "0:0", "type": "DOCUMENT", "children": [
         {"id": "P1", "type": "CANVAS", "name": "Page A", "children": [
@@ -548,6 +556,8 @@ def selftest():
         data = plant("K", doc)
         case("detached frame D matches main M by shape", data["frame_of"].get("D") == ("M",), data["frame_of"])
         case("4-layer look-alike SF does not match button SB", "SF" not in data["frame_of"], data["frame_of"])
+        case("text: the words on label s1 and its copy xs1 are kept, and no layer without words is",
+             sorted(data["text"]) == ["s1", "xs1"] and "$5.49" in data["text"]["s1"], data["text"])
         rep = check("K", ["B/h", "B/3", "F2", "A"], comments, mode="cache")
         same = sorted(rep.same_layer("B/h", open_only=False))
         case("heading on B finds t1 (A, other page) and t3 (detached), t5 resolved on B; not t2",

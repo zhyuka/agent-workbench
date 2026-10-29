@@ -11,9 +11,10 @@ you see fit and give the user a better recommendation, or say the original holds
 checked to find that out.
 
 Where to look: this machine (the project's `CLAUDE.md` and any workspace map or tools index it
-names; the memory index under `~/.claude/projects/<project>/memory/MEMORY.md`; the open-question
-ledger, `.claude/open-questions.md` at the project root unless the project names another), the code
-and its git history, current official docs, and the web.
+names; the file it names for where each kind of fact lives, else the memory index under
+`~/.claude/projects/<project>/memory/MEMORY.md`; the open-question ledger,
+`.claude/open-questions.md` at the project root unless the project names another), the code and its
+git history, current official docs, and the web.
 
 You only read. Don't edit or create files, don't write to any tracker, design tool, chat or repo
 remote, don't launch a browser, and never print a credential.

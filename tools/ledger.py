@@ -3,8 +3,9 @@
 
     python tools/ledger.py                    read the new lines of every main session log, re-link, write
     python tools/ledger.py --rebuild          forget the offsets and read every log from the start
-    python tools/ledger.py --open [--session ID]   print the open requests (one session, or all), oldest first
-    python tools/ledger.py --questions        print the open questions put off on a card, with their ids
+    python tools/ledger.py --open [--session ID]   print the open requests (one session, or all), oldest first,
+                                              each with the id a card names it by
+    python tools/ledger.py --questions       print the open questions put off on a card, with their ids
     python tools/ledger.py --calibrate LABELS score kind and state against a file of hand labels
     python tools/ledger.py --selftest         planted logs: each source, each state, offsets, exclusions
 
@@ -27,8 +28,9 @@ requests.jsonl (the entries), state.json (offsets), .cache/ (git scans). --dir o
 WHAT IT RECORDS, one JSON line per entry in requests.jsonl:
   - every message the user typed: a user turn whose origin is human (or, in older logs with no
     origin, one that is not a harness line), and a message sent mid-turn (an attachment
-    queued_command with humanTurn). Not tool results, compaction summaries, messages from other
-    sessions, task notifications, skill bodies, system reminders or built-in slash commands. A typed
+    queued_command with humanTurn). Not a turn whose turnOrigin names another sender, such as "sdk"
+    for a prompt a script sent into a desktop session. Not tool results, compaction summaries,
+    messages from other sessions, task notifications, skill bodies, system reminders or built-in slash commands. A typed
     slash command keeps its words as "/name args". A "Do this task here" click and a session's first
     message that is a spawn_task prompt are kept with source chip / spawned, since the words are an
     agent's.
@@ -39,9 +41,12 @@ WHAT IT RECORDS, one JSON line per entry in requests.jsonl:
 
 KIND. request (asks for work), decision (states a choice, a rule or a fact the user holds), answer (a
 card pick, or a short reply to the agent's question), question (a card question asked TO the user
-that was put off: "Later", "Not yet", "Not now", "Defer", "Hold..." or "Wait..."), other (chat, a
-question about status, a paste). Plain patterns, scored on hand labels by --calibrate. A free-text
-card answer is classified like a typed message, since "figure it out" on a card is a request.
+that was put off: "Later", "Not yet", "Not now", "Defer", "Hold..." or "Wait...", with a "Now"
+option beside it or not, or a lone "Park..." that names no home, such as "Park until the name is
+set"), other (chat, a question about status, a paste). Plain patterns, scored on hand labels by
+--calibrate. A free-text card answer is classified like a typed message, since "figure it out" on a
+card is a request, unless the words lead with a put-off ("not yet. we're still in call", "hold for
+the pool owner"): a question too.
 
 STATE, with the evidence it rests on in `ref` and the rule that set it in `why`:
   done      a commit (sha) the session made after it, before its next request, or files it edited; a
@@ -54,16 +59,22 @@ STATE, with the evidence it rests on in `ref` and the rule that set it in `why`:
   card      a memory card (file) the session wrote after it, or one that quotes its words
   dropped   the user's own later words in that session withdrawing it (quoted)
   answered  a card pick, or a short reply to the agent's question; for a question put off, the
-            answer on a later card that names its id or asks it again
-  open      none of the above: no home outside this log
+            answer on a later card that names its id or asks it again; for an open request, the
+            pick on a later card that names its id
+  open     none of the above: no home outside this log
 The thread of a request is the request and the answers and short replies that follow it in the same
 session, up to the next request or decision; its evidence is the union over the thread.
   - Research or a lasting fix ("research", "/ambition", "from root", "figure it out") is settled only
     by an edit, a commit, a store entry or a reply that leads with a result. One answered in chat
     that ends on a proposal or "needs you" stays open: that is how proposals get lost.
   - Any other request stays open when the session ends on a step only the user can take.
-  - Asked for later ("remind me", "when it lands", "own session", a "Later" beside a "Now" option)
-    is settled only by an artifact or a reply about it, or a chip offered for it.
+  - Asked for later in the user's own words ("remind me", "verify it when it lands", "own session"),
+    or handed on by a card pick that sends the work to another session, a queue or a work tracker
+    ("Separate session", "Park it in ADO"), is settled only by an artifact or a reply about it, or a
+    chip offered for it. Only these two may close on a reply that leads with a result, since the
+    reply is the work asked for or shows the hand-off happened; for a card pick it must share two of
+    the card's words, not one. A card pick that was put off never closes this way: it is a question,
+    below.
   - A question put off (kind question) gets a stable id, q- and six hex digits of its entry id, and
     stays open in DIGEST.md until a later card names that id (a follow-up, or a triage pass) or
     asks the same question, and it is answered there: then it is answered, with that card in `ref`.
@@ -71,8 +82,13 @@ session, up to the next request or decision; its evidence is the union over the 
     it is listed once. Nothing else closes it: not a reply about it, a commit, an edit or a quote.
     A put-off question that names a work item or a draft is held where it lives, so it stays an
     answer.
+  - An open request goes by the first 8 hex digits of its entry id, which --open and DIGEST.md print;
+    a card pick's entry id (card:<tool id>:<n>) has none, so it goes by the first 8 of that id's sha1.
+    It is answered when a later card, in any session, names that id and the pick on the newest such
+    card does not leave it open ("Later", "Leave...", "Keep...", "No", "Skip"...).
   - Typed again word for word: listed once, at the latest copy (repeated_as). Added to before any
-    reply: takes the state of the request that followed, which points back (follow_up_of).
+    reply: takes the state of the request that followed, which points back (follow_up_of). Neither
+    holds for a card pick: the same pick on two cards is two requests.
   - A ruled entry carries scope (the ruling's match block and the tools its source names) and
     supersedes (an earlier ledger entry ruled under the same id).
 Decisions take the same states, with open meaning "only in the log".
@@ -277,6 +293,10 @@ def typed_of(r):
     kind = origin.get("kind") if isinstance(origin, dict) else None
     if kind and kind != "human":
         return None
+    # a prompt a script sent into a desktop session (a brief, a probe, a bench run) carries no origin and
+    # turnOrigin "sdk"; the user's own turns there carry turnOrigin "human"
+    if r.get("turnOrigin") not in (None, "human"):
+        return None
     bl = blocks(r)
     if any(b.get("type") == "tool_result" for b in bl):
         return None
@@ -290,7 +310,6 @@ GIT_COMMIT = re.compile(r"\bgit\b[^\n|;&]*\bcommit\b")
 GIT_PUSH = re.compile(r"\bgit\b[^\n|;&]*\bpush\b")
 ADO_CREATE = re.compile(r"\bado(?:_write|_rest)?\.py\b[^\n]*\b(create|new|add|file)\b")
 SHA_LINE = re.compile(r"^\[([^\]\s]+)(?: \(root-commit\))? ([0-9a-f]{7,40})\] (.*)$", re.M)
-SHA_ONELINE = re.compile(r"^([0-9a-f]{7,40}) (\S.*)$", re.M)
 PUSHED = re.compile(r"^\s*([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})\s+\S+\s+->\s+(\S+)", re.M)
 ADO_MADE = re.compile(r"\bcreated #(\d{3,6})\b|\"id\":\s*(\d{3,6}),\s*\"rev\":\s*1\b")
 RULING_ID = re.compile(r'"id"\s*:\s*"([a-z0-9][a-z0-9-]{2,80})"')
@@ -693,8 +712,6 @@ RULE_QUESTION = re.compile(r"\b(what should the rule|should the rule|which way s
                            r"everywhere|scope of|gate scope|site rule|site-wide|sitewide|standing rule|from now on)\b",
                            re.I)
 QUOTED = re.compile(r"[\"“][^\"”]{12,}[\"”]")
-CHECK_RX = re.compile(r"\b(check|verify|confirm|make sure|did (u|you)|is it|are (they|we|u|you)|test|see if|look at|"
-                      r"review|what (is|are|does)|why|how)\b")
 RESEARCH_RX = re.compile(r"(/ambition|\bresearch\b|figure (it |this |that )?out|(?<!whichever is )(?<!whatever is )smartest|"
                          r"best practice|from root|"
                          r"root fix|think bigger|look into|dig into|investigate|what should happen|"
@@ -710,12 +727,13 @@ FOLLOW_RX = re.compile(r"\b(did (u|you) even|still|again|not fixed|doesn'?t (see
 DROP_RX = re.compile(r"\b(nvm|never ?mind|forget (it|that|about (it|that))|scratch that|ignore (that|it|my last)|"
                      r"cancel (that|it)|don'?t (do|bother with) (it|that)|no need (to do|for) (it|that)|not needed anymore|"
                      r"don'?t (file|post|send|push|make|build|commit) (it|that|this|them))\b")
-# An option that sends the work to later or to another session. A bare "Later" counts only beside a "Now"
-# option; on a draft or an open question it holds the item where it already lives, and "Another session has
-# them" says who has it.
+# An option that sends the work to another session, a queue or a work tracker. A "Later" or a lone "Park..."
+# puts the question off (puts_off_question) before this is read, and "Another session has them" says who has it.
 PARK_OPTION = re.compile(r"\b(separate task|own session|their own session|separate session|new session|next session|"
                          r"park|queue)\b", re.I)
-LATER_OPTION = re.compile(r"^(later|not yet)\b", re.I)
+# A question that asks which work gets its own session ("Which other moves should get their own session now?"),
+# not one that says so in passing ("...stays local for its own session. Push it?") or "get its own value".
+OWN_SESSION = re.compile(r"\bown sessions?\b", re.I)
 USER_LATER = re.compile(r"\b(me|i'?ll|i will|will) (\w+ )?(later|lyk|let (u|you) know|ping (u|you)|tell (u|you))\b[^.?!]*",
                       re.I)
 WORK_VERBS = re.compile(r"\b(fix|build|make|add|update|remove|file|push|commit|post|draft|write|create|change|redo|apply|"
@@ -735,10 +753,21 @@ PICK_NO_WORK = re.compile(r"^(skip|leave|keep|hold|no\b|don'?t|not now|close|def
 # A pick that puts the card's question off rather than answering it, and one that skips it.
 DEFER_PICK = re.compile(r"^(later|not yet|not now|defer|hold|wait)\b", re.I)
 PUT_OFF = re.compile(r"^\W*(later|not yet|not now|defer|hold|wait|skip)\b", re.I)
+# Typed words that put it off; a bare "wait" or "hold on" is more often "wait, why...?" to the agent.
+TYPED_PUT_OFF = re.compile(r"^\W*(later|not yet|not now|defer\w*|hold (for|until|till|off)|wait (for|until|till|on))\b",
+                           re.I)
+# The only pick, leading with "Park" ("Park until the name is set"), also puts it off unless it names a home
+# ("Park it in ADO"). A park beside other work ("Design first, park the rest", one of a multi-select's picks) is
+# a request: such parks go to a register or a work tracker.
+PARK_PICK = re.compile(r"^\W*park\b", re.I)
+HANDS_ON = re.compile(r"\b(ado|session|separate task|queue|register)\b", re.I)
 # A put-off question that already lives somewhere: a work item, or a draft in a drafts file
 # ("Draft on 12:34 (...): what should happen to it?", "The vendor message: what should happen to it?").
 HELD_ELSEWHERE = re.compile(r"(?:#|_workitems/edit/)\d{3,5}\b|\b(draft|message)\b[^?\n]{0,100}:\s*what\b", re.I)
 QID = re.compile(r"\bq-[0-9a-f]{6}\b", re.I)
+REQ_ID = re.compile(r"\b[0-9a-f]{8}\b", re.I)
+# A pick on a card that names an open request and leaves it open ("No longer needed" closes it).
+KEEPS_OPEN = re.compile(r"^\W*(later|not yet|not now|defer|hold|wait|skip|leave|keep|don'?t|no\b(?! longer))", re.I)
 
 
 def picks_of(e):
@@ -755,20 +784,30 @@ def picks_of(e):
 
 
 def puts_off_question(e):
-    """The pick that puts off a question asked TO the user, or None. A "Later" beside a "Now" is a
-    request for later work (classify), and a question that names a work item or a draft is held where it
+    """The pick that puts off a question asked TO the user ("Later", "Defer"..., "Now" beside it or not, or
+    a lone "Park..."), the typed words when they lead that way ("not yet. we're still in call"), or None. One
+    that hands the work on is a request (classify); a question naming a work item or a draft is held where it
     lives."""
-    labels = [o["label"] for o in e.get("options") or []]
-    if any(re.match(r"^now\b", l, re.I) for l in labels):
-        return None
     if HELD_ELSEWHERE.search((e.get("question") or "") + " " + (e.get("header") or "")):
         return None
-    return next((p for p in picks_of(e) if DEFER_PICK.match(p)), None)
+    if e.get("answer_kind") == "typed":
+        t = e.get("text") or ""
+        return own_words(t)[:60] if e.get("status") == "answered" and TYPED_PUT_OFF.match(t) else None
+    picks = picks_of(e)
+    return next((p for p in picks if DEFER_PICK.match(p) or (PARK_PICK.match(p) and len(picks) == 1
+                                                              and not HANDS_ON.search(p))), None)
 
 
 def qid_of(e):
     """The id a put-off question is shown and named by: q- and six hex digits of its entry id."""
     return "q-" + hashlib.sha1(e["id"].encode()).hexdigest()[:6]
+
+
+def rid_of(e):
+    """The id an open request is shown and named by: the first 8 hex digits of its entry id, or of that id's
+    sha1 for a card pick (card:<tool id>:<n>), or None."""
+    rid = (hashlib.sha1(e["id"].encode()).hexdigest() if e["id"].startswith("card:") else e["id"])[:8].lower()
+    return rid if re.fullmatch(r"[0-9a-f]{8}", rid) else None
 
 
 def own_words(text):
@@ -850,19 +889,13 @@ def classify(e, asked_before):
         if e.get("answer_kind") == "typed":
             # A typed answer can carry option labels ("..., Queryable record (Recommended), One CLI per service").
             picked = [l for l in opts if l and re.sub(r"\s*\(recommended\)", "", l, flags=re.I) in text]
-        for p in picked:
-            if p not in opts or PICK_NO_WORK.match(p or "") or USER_LATER.search(p or ""):
-                continue
-            if LATER_OPTION.match(p or ""):
-                if any(re.match(r"^now\b", l, re.I) for l in opts):
-                    e["defers"] = True  # "Now / Later" about the agent's own work
-                    return "request"
-                continue
-            if PARK_OPTION.search(p) or re.search(r"\b(own session|their own session|get (its|their) own)\b", q, re.I):
-                e["defers"] = True      # the work it picks happens later or in another session
-                return "request"
         if puts_off_question(e):
             return "question"           # asked TO the user and put off: open until a later card answers it
+        asks_own = any(OWN_SESSION.search(x) for x in re.findall(r"[^.?!]*\?", q))
+        for p in picked:
+            if p in opts and not (PICK_NO_WORK.match(p) or USER_LATER.search(p)) and (PARK_OPTION.search(p) or asks_own):
+                e["defers"] = True      # the work it picks goes to another session, a queue or a work tracker
+                return "request"
         if e.get("answer_kind") == "typed":
             words = re.sub(r"^\s*/[\w:-]+\s*", "", QUOTED.sub(" ", text))
             for l in picked:
@@ -1144,10 +1177,11 @@ def link(entries, state, stores, relink=False):
                                           or PENDING.search(pev.get("reply") or "")))
             if relink or "kind" not in e:
                 e["kind"] = classify(e, asked_before)
-            elif e["kind"] == "answer" and e["source"] == "card" and puts_off_question(e):
-                e["kind"] = "question"      # a card read before the put-off-question rule
+            elif e["kind"] in ("answer", "request", "decision") and e["source"] == "card" and puts_off_question(e):
+                e["kind"] = "question"      # a card read before the put-off-question rules
             if e["kind"] == "question":
                 e["qid"] = qid_of(e)
+                e.pop("defers", None)       # read as a request for later before those rules
             else:
                 e.pop("qid", None)
         # segments: a new one starts at each typed, chip or spawned request or decision
@@ -1181,6 +1215,7 @@ def link(entries, state, stores, relink=False):
             if e["kind"] == "request":
                 last_req = e
     close_questions(entries)
+    close_requests(entries)
     cross_link(entries, stores)
     add_scope(entries, stores)
     add_state_refs(entries, state, stores)
@@ -1222,11 +1257,12 @@ def minutes_between(a, b):
 
 def carry(es):
     """An open request typed again word for word, or added to before any reply came, is carried by the
-    later request: it takes that one's state, and the later one points back at it."""
+    later request: it takes that one's state, and the later one points back at it. Not a card pick: two
+    cards that get the same pick are two requests, and only a card that names its id carries one."""
     reqs = [e for e in es if e["kind"] in ("request", "decision")]
     for a_i in range(len(reqs) - 1, -1, -1):
         a = reqs[a_i]
-        if a.get("state") != "open":
+        if a.get("state") != "open" or a["source"] == "card":
             continue
         later = reqs[a_i + 1:]
         words = norm(words_of(a.get("text") or ""))
@@ -1380,7 +1416,7 @@ def state_of(e, rest, session_entries, later_commits, stores):
         r = next((r for r in results if related(r)), None)
         if r:
             set_state(e, "done", "reported", "asked for later; a reply about it leads with a result: " + first_sentence(r)[:110])
-        elif first_is_result and (len(mine) <= 1 or mine & salient(own_reply[:700])):
+        elif first_is_result and e["source"] != "card" and (len(mine) <= 1 or mine & salient(own_reply[:700])):
             set_state(e, "done", "reported", "asked for later; the reply to it leads with the result: "
                       + first_sentence(own_reply)[:110])
         elif (question or nothing) and own_reply:
@@ -1433,8 +1469,7 @@ def close_questions(entries):
     """A question put off is answered when a later card, in any session, names its id (a follow-up or a
     triage pass) or asks the same question, and it is answered there rather than put off or skipped. Put off again on such a card, that card carries it (repeated_as), so it is listed once and closes
     when the later one does. Re-run in full every run, from the entries alone."""
-    cards = sorted((e for e in entries.values() if e["source"] == "card" and e.get("status") == "answered"),
-                   key=lambda e: (e.get("ts") or "", e["id"]))
+    cards = answered_cards(entries)
     qs = [e for e in cards if e["kind"] == "question"]
     for q in reversed(qs):          # newest first, so a later question that carries one is settled first
         q.pop("repeated_as", None)
@@ -1442,9 +1477,7 @@ def close_questions(entries):
         for c in cards:
             if (c.get("ts") or "") <= (q.get("ts") or ""):
                 continue
-            hay = " ".join([c.get("question") or "", c.get("header") or ""]
-                           + [o.get("label", "") + " " + o.get("description", "") for o in c.get("options") or []])
-            named = qid in {m.lower() for m in QID.findall(hay)}
+            named = qid in {m.lower() for m in QID.findall(card_words(c))}
             if not (named or (same and norm(c.get("question") or "") == same)):
                 continue
             how = f"names {qid}" if named else "asks the same question"
@@ -1460,6 +1493,31 @@ def close_questions(entries):
             set_state(q, "answered", c["id"], f"answered on a later card that {how}: "
                       + cap(own_words(c.get("text") or ""), 120))
             break
+
+
+def answered_cards(entries):
+    """Every card the user answered, oldest first."""
+    return sorted((e for e in entries.values() if e["source"] == "card" and e.get("status") == "answered"),
+                  key=lambda e: (e.get("ts") or "", e["id"]))
+
+
+def card_words(c):
+    """A card's question, header and options: where a later card names an id."""
+    return " ".join([c.get("question") or "", c.get("header") or ""]
+                    + [o.get("label", "") + " " + o.get("description", "") for o in c.get("options") or []])
+
+
+def close_requests(entries):
+    """An open request is answered when a later card, in any session, names its id (rid_of, which --open
+    prints) and the pick on the newest such card does not leave it open (KEEPS_OPEN). Re-run in full every
+    run, from the entries alone."""
+    cards = [(c, {m.lower() for m in REQ_ID.findall(card_words(c))}) for c in answered_cards(entries)]
+    for e in entries.values():
+        rid = e["kind"] == "request" and e.get("state") == "open" and rid_of(e)
+        named = [c for c, ids in cards if rid and rid in ids and (c.get("ts") or "") > (e.get("ts") or "")]
+        if named and not KEEPS_OPEN.match(named[-1].get("text") or ""):
+            set_state(e, "answered", named[-1]["id"], f"answered on a later card that names {rid}: "
+                      + cap(own_words(named[-1].get("text") or ""), 120))
 
 
 def cross_link(entries, stores):
@@ -1594,10 +1652,10 @@ def _run(ledger_dir, projects, rebuild, relink, stores_kw, quiet):
     return entries, problems
 
 
-def open_requests(ledger_dir=None, session=None):
+def open_requests(ledger_dir=None, session=None, kind="request"):
     rows = load_jsonl(os.path.join(ledger_dir or LEDGER_DIR, "requests.jsonl")).values()
     # a request typed again word for word is listed once, at its latest copy
-    return sorted((e for e in rows if e.get("kind") == "request" and e.get("state") == "open"
+    return sorted((e for e in rows if e.get("kind") == kind and e.get("state") == "open"
                    and not e.get("repeated_as")
                    and (not session or e["session"].startswith(session))), key=lambda e: e.get("ts") or "")
 
@@ -1605,16 +1663,14 @@ def open_requests(ledger_dir=None, session=None):
 def open_questions(ledger_dir=None):
     """The questions put off on a card that no later card has answered, oldest first; one carried by a
     later card is listed at that card."""
-    rows = load_jsonl(os.path.join(ledger_dir or LEDGER_DIR, "requests.jsonl")).values()
-    return sorted((e for e in rows if e.get("kind") == "question" and e.get("state") == "open"
-                   and not e.get("repeated_as")), key=lambda e: e.get("ts") or "")
+    return open_requests(ledger_dir, kind="question")
 
 
 def show_open(rows):
     for e in rows:
         where = e.get("title") or e["session"][:8]
-        words = (f"{e['qid']}  \"{cap(own_words(e.get('question') or ''), 200)}\" -> " if e.get("qid") else "") \
-            + cap(own_words(e.get("text") or ""), 220)
+        words = (f"{e['qid']}  \"{cap(own_words(e.get('question') or ''), 200)}\" -> " if e.get("qid")
+                 else f"{rid_of(e)}  " if rid_of(e) else "") + cap(own_words(e.get("text") or ""), 220)
         print(f"{(e.get('ts') or '')[:16]}  {where[:50]}  [{e['source']}]  {words}")
         print(f"    {e.get('why', '')}")
 
@@ -1709,8 +1765,9 @@ def selftest():
             r.update(k)
             return json.dumps(r)
 
-        def typed(ts, text):
-            return rec("user", ts, message={"role": "user", "content": text}, origin={"kind": "human"})
+        def typed(ts, text):     # the desktop app's shape for the user's own turn: promptSource sdk, turnOrigin human
+            return rec("user", ts, message={"role": "user", "content": text}, origin={"kind": "human"},
+                       promptSource="sdk", turnOrigin="human")
 
         def say(ts, text):
             return rec("assistant", ts, message={"role": "assistant", "content": [{"type": "text", "text": text}]})
@@ -1750,6 +1807,8 @@ def selftest():
             rec("user", "10:08", message={"role": "user", "content": [{"type": "text", "text": "Base directory for this skill"}]},
                 isMeta=True),
             typed("10:09", "Another Claude session sent a message:\n<cross-session-message from=\"x\">hi?</cross-session-message>"),
+            rec("user", "10:09", message={"role": "user", "content": "# Pre-review: the planted scripted brief"},
+                promptSource="sdk", turnOrigin="sdk"),
             typed("10:09", "<command-name>/compact</command-name>"),
             typed("10:10", "<command-message>ambition</command-message><command-name>/ambition</command-name>"
                            "<command-args>think bigger about the planted deck</command-args>"),
@@ -1847,7 +1906,103 @@ def selftest():
                          "Wait for the sync")
                   + card("13:45", "c2", f"{qid('c1')}: archive the planted inbox now?", ["Archive it now", "Later"],
                          "Later"))
-        for name, ls in (("s3", lines3), ("s4", lines4)):
+        # Open requests for later (s5), and cards in another session (s6) that name them by id, or don't.
+        rids = {"close": "a1b2c3d4-0000-4000-8000-000000000001", "keep": "b2c3d4e5-0000-4000-8000-000000000002",
+                "other": "c3d4e5f6-0000-4000-8000-000000000003"}
+
+        def in_session(sid, ls):
+            return [json.dumps({**json.loads(x), "sessionId": sid}) for x in ls]
+
+        def asked(ts, uid, text):
+            return rec("user", ts, uuid=uid, message={"role": "user", "content": text}, origin={"kind": "human"})
+        lines5 = in_session("s5", [asked("14:00", rids["close"], "remind me to re-run the planted export next week"),
+                                   say("14:00", "Will do."),
+                                   asked("14:01", rids["keep"], "remind me to prune the planted thumbnails next week"),
+                                   say("14:01", "Will do."),
+                                   asked("14:02", rids["other"], "remind me to re-sort the planted folders next week"),
+                                   say("14:02", "Will do.")])
+        lines6 = in_session("s6", [typed("15:00", "go through the planted ledger")]
+                            + card("15:01", "k1", "Request a1b2c3d4 (the planted export) ran: close it?",
+                                   ["Close it, done (Recommended)", "Leave it for triage"],
+                                   "Close it, done (Recommended)", header="a1b2c3d4")
+                            + card("15:02", "k2", "Request b2c3d4e5 (the planted thumbnails): close it?",
+                                   ["Close it (Recommended)", "Leave it for triage"], "Leave it for triage")
+                            + card("15:03", "k3", "The planted folders, and commit 0badcafe: re-sort them now?",
+                                   ["Yes (Recommended)", "No"], "Yes (Recommended)"))
+        # A pick put off beside a "Now" (s7). The known bad case: the last of three questions on one card, "Later,
+        # through /triage" beside "Now, here", then an unrelated edit, a commit and a reply that leads with a
+        # result; it read done on that reply. And the known good one: a "Later" beside a "Now" that a later triage
+        # card names by id and the user answers there.
+        tri = [{"question": "The planted tools commit adds 508 net lines and its hook refuses that. How should it land?",
+                "header": "Tools commit",
+                "options": [{"label": "You run it with --no-verify (Recommended)", "description": "one command"},
+                            {"label": "Hold it uncommitted", "description": "unversioned"}]},
+               {"question": "Your cap holds the planted eval: no paid runs. Should the benchmark run anyway?",
+                "header": "Benchmark",
+                "options": [{"label": "Keep the cap, skip it (Recommended)", "description": "no run cost"},
+                            {"label": "Lift the cap for one fixed run", "description": "one paid run"}]},
+               {"question": "Ten planted facts disagree between sources, and some card pieces were held as your "
+                            "call. When do you want to settle them?", "header": "Conflicts",
+                "options": [{"label": "Later, through /triage (Recommended)", "description": "kept unresolved"},
+                            {"label": "Now, here", "description": "I put them on question cards, four at a time."}]}]
+        tri_picks = ["you run it with --no-verify? what would that change?",
+                     "Keep the cap, skip it (Recommended)", "Later, through /triage (Recommended)"]
+        lines7 = in_session("s7", [typed("16:00", "redesign the planted notes system"),
+                                   tool("16:01", "t26", "AskUserQuestion", questions=tri),
+                                   result("16:02", "t26", "answered",
+                                          {"answers": {q["question"]: a for q, a in zip(tri, tri_picks)}}),
+                                   tool("16:03", "w26", "Edit", file_path="/Users/x/Desktop/notes/layer.md",
+                                        old_string="a", new_string="b"),
+                                   tool("16:04", "g26", "Bash", command="git commit -qm x"),
+                                   result("16:04", "g26", "[wt/notes e6425e8] Add the planted rules"),
+                                   say("16:05", "The last stale doc from this change is fixed. Its status line now "
+                                                "says the new design replaced it. The two doc checks pass on it, "
+                                                "and no other doc links to it.")]
+                            + card("16:10", "g1", "Port the planted mail rule to the new server?",
+                                   ["Now", "Later (Recommended)"], "Later (Recommended)")
+                            + card("16:20", "g2", f"Triage {qid('g1')} (planted mail rule): port it now?",
+                                   ["Resolve: port it (Recommended)", "Defer", "Skip"], "Resolve: port it (Recommended)"))
+        # Parks and hand-offs (s8): a lone "Park..." puts it off; a park beside other work, alone or among a
+        # multi-select's picks, is a request; a hand-off is not closed by a result-led reply that shares one word.
+        multi = {"question": "Before the planted archive, which of these should I do?", "header": "Planted",
+                 "multiSelect": True, "options": [{"label": l, "description": ""} for l in (
+                     "Send the planted heads-ups", "Park the planted decisions", "None")]}
+        lines8 = in_session("s8", card("17:00", "p1", "Rename the planted team page?",
+                                       ["Park until the name is set (Recommended)", "Rename it now"],
+                                       "Park until the name is set (Recommended)")
+                            + card("17:02", "p2", "How should the planted bands close?",
+                                   ["Design first, park the rest (Recommended)", "Stop here"],
+                                   "Design first, park the rest (Recommended)")
+                            + [tool("17:04", "p3", "AskUserQuestion", questions=[multi]),
+                               result("17:04", "p3", "answered", {"answers": {
+                                   multi["question"]: ["Send the planted heads-ups", "Park the planted decisions"]}})]
+                            + card("17:10", "h1", "Run the planted export audit here, or in its own session?",
+                                   ["Separate session (Recommended)", "Here"], "Separate session (Recommended)")
+                            + [say("17:11", "Fixed the audit banner in Header.tsx.")]
+                            # an open card request has an id too, and a later card that names it closes it
+                            + card("17:30", "h3", "Run the planted backup audit here, or in a separate session?",
+                                   ["Separate session (Recommended)", "Here"], "Separate session (Recommended)")
+                            + card("17:40", "h4", f"Request {hashlib.sha1(b'card:h3:0').hexdigest()[:8]} (the planted "
+                                   "backup audit) ran there: close it?", ["Close it, done (Recommended)", "Leave it"],
+                                   "Close it, done (Recommended)")
+                            # typed answers: a put-off is a question; "wait, why...?" is not; nor one a tracker holds
+                            + card("18:00", "t1", "Put the planted mockups on the board?",
+                                   ["Put them on (Recommended)", "Not yet"], "not yet. we're still in call, ask me after")
+                            + [say("18:01", "Done: the planted mockups are on the board, and the call notes too.")]
+                            + card("18:02", "t2", "Rerun the planted export?", ["Rerun it (Recommended)", "Skip"],
+                                   "wait, why does the planted export fail?")
+                            + card("18:04", "t3", "Decision #2380: the planted pool owner?", ["Ask them (Recommended)"],
+                                   "hold for the planted pool owner")
+                            # a hand-off by the question's words only when the question asks it
+                            + card("19:00", "u1", "The peer's planted commit stays local for its own session. "
+                                   "Push 1234abd only?", ["Push 1234abd only (Recommended)", "Don't push yet"],
+                                   "Push 1234abd only (Recommended)")
+                            + card("19:02", "u2", "Should each planted page get its own value?",
+                                   ["Per page (Recommended)", "One value"], "Per page (Recommended)")
+                            + card("19:04", "u3", "Which planted move should get its own session now?",
+                                   ["Queryable planted record (Recommended)", "None"], "Queryable planted record (Recommended)"))
+        for name, ls in (("s3", lines3), ("s4", lines4), ("s5", lines5), ("s6", lines6), ("s7", lines7),
+                         ("s8", lines8)):
             with open(os.path.join(proj, name + ".jsonl"), "w", encoding="utf-8") as f:
                 f.write("\n".join(ls) + "\n")
         os.makedirs(os.path.join(proj, "s1", "subagents"))
@@ -1889,6 +2044,9 @@ def selftest():
         check("a typed slash command keeps its words", get("/ambition think bigger about the") is not None)
         check("headless, scratch-folder, skip_cwd and skip_first sessions are skipped",
               "headless thing" not in texts and "Scripted helper" not in texts)
+        check("a prompt a script sent into a desktop session (turnOrigin sdk) is not the user's words; the user's "
+              "own turns, tagged turnOrigin human, still are",
+              "planted scripted brief" not in texts and get("fix the planted widget crash") is not None)
         check("a work item the session created after it: filed", (get("file an ado item") or {}).get("state") == "filed"
               and get("file an ado item").get("ref") == "2999")
         check("a rulings file entry the session wrote after it: ruled",
@@ -1942,14 +2100,57 @@ def selftest():
               and (cq.get("c2") or {}).get("kind") == "question" and cq["c2"].get("state") == "open")
         check("an ordinary card pick still reads as an answer, answered",
               (cq.get("b3") or {}).get("kind") == "answer" and cq["b3"].get("state") == "answered")
-        check("a 'Now / Later' pick is still a request for later, open while nothing durable holds it",
-              (cq.get("b2") or {}).get("kind") == "request" and cq["b2"].get("defers") is True
-              and cq["b2"].get("state") == "open")
+        check("a 'Now / Later' pick is a question put off, open under its id; a reply does not close it",
+              (cq.get("b2") or {}).get("kind") == "question" and cq["b2"].get("state") == "open"
+              and cq["b2"].get("qid") == qid("b2") and "defers" not in cq["b2"])
         check("a 'Defer' on a question that names a work item stays an answer: the tracker holds it",
               (cq.get("b4") or {}).get("kind") == "answer" and cq["b4"].get("state") == "answered")
+        held = entries.get("card:t26:2") or {}
+        q_held = "q-" + hashlib.sha1(b"card:t26:2").hexdigest()[:6]
+        check("a 'Later' picked beside a 'Now' is a question put off, open under its id: the edit, the commit and "
+              "the reply that leads with a result do not close it",
+              held.get("kind") == "question" and held.get("state") == "open" and held.get("qid") == q_held)
+        check("a 'Later' beside a 'Now' that a later triage card names by id, answered there, is closed by that card",
+              (cq.get("g1") or {}).get("state") == "answered" and cq["g1"].get("ref") == "card:g2:0")
+        check("a lone 'Park until the name is set' puts the question off: open under its id",
+              (cq.get("p1") or {}).get("kind") == "question" and cq["p1"].get("state") == "open")
+        check("a park beside other work ('Design first, park the rest', or one of a multi-select's picks) is a request",
+              (cq.get("p2") or {}).get("kind") == "request" and (cq.get("p3") or {}).get("kind") == "request")
+        check("a hand-off pick ('Separate session') stays open on a result-led reply that shares one of its words",
+              (cq.get("h1") or {}).get("kind") == "request" and cq["h1"].get("state") == "open")
+        check("a typed 'not yet. we're still in call' puts the question off like a pick: open under its id, and a "
+              "result-led reply about it does not close it",
+              (cq.get("t1") or {}).get("kind") == "question" and cq["t1"].get("state") == "open"
+              and cq["t1"].get("qid") == qid("t1"))
+        check("a typed 'wait, why...?' is not a put-off, nor a typed 'hold for...' on a question that names a work item",
+              (cq.get("t2") or {}).get("kind") not in (None, "question") and (cq.get("t3") or {}).get("kind")
+              not in (None, "question"))
+        check("a pick is handed to its own session by the question's words only when the question asks it: not "
+              "'...stays local for its own session. Push...?' or 'get its own value?'",
+              (cq.get("u1") or {}).get("kind") == "answer" and (cq.get("u2") or {}).get("kind") == "answer"
+              and (cq.get("u3") or {}).get("kind") == "request" and cq["u3"].get("defers") is True)
         listed_q = [r["qid"] for r in open_questions(led)]
         check("--questions lists the open ones by id, oldest first, each once",
-              listed_q == [qid("b1"), qid("e1"), qid("c2")])
+              listed_q == [qid("b1"), qid("b2"), qid("e1"), qid("c2"), q_held, qid("p1"), qid("t1")])
+        rq = {k: entries.get(v) or {} for k, v in rids.items()}
+        check("an open request closed on a later card, in another session, that names its id is answered, "
+              "by that card", rq["close"].get("state") == "answered" and rq["close"].get("ref") == "card:k1:0")
+        check("a later card that names its id and leaves it open ('Leave it for triage') keeps it open",
+              rq["keep"].get("kind") == "request" and rq["keep"].get("state") == "open")
+        check("a card that names no open request's id (a commit's 8 hex digits) closes none",
+              rq["other"].get("kind") == "request" and rq["other"].get("state") == "open")
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown):
+            show_open(open_requests(led, "s5"))
+        check("--open prints each open request with the id a card names it by, and not the closed one",
+              "b2c3d4e5  remind me to prune" in shown.getvalue() and "c3d4e5f6  remind me" in shown.getvalue()
+              and "a1b2c3d4" not in shown.getvalue())
+        shown8 = io.StringIO()
+        with contextlib.redirect_stdout(shown8):
+            show_open(open_requests(led, "s8"))
+        check("an open card request goes by 8 hex digits of its entry id's sha1: --open prints them, and a later card "
+              "that names them closes it", f"{rid_of(cq.get('h1') or {'id': ''})}  Separate session" in shown8.getvalue()
+              and (cq.get("h3") or {}).get("state") == "answered" and cq["h3"].get("ref") == "card:h4:0")
         count = len(entries)
         # incremental: finish the partial line and add one more; a re-run reads only those
         with open(log, "a", encoding="utf-8") as f:

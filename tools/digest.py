@@ -176,7 +176,7 @@ def render(rows, now=None, rulings=None, sections=None, ledger_path=None, elsewh
         out.append("None. Every request has a commit, a work item, a ruling, a card or a reply that settles it.")
     for e in opens[:OPEN_MAX]:
         d = age_days(e, now)
-        out.append(f"- {when(e)} ({d}d) · {where(e)} · {words(e)}")
+        out.append(f"- {'`%s` ' % ledger.rid_of(e) if ledger.rid_of(e) else ''}{when(e)} ({d}d) · {where(e)} · {words(e)}")
     if len(opens) > OPEN_MAX:
         out.append(f"- and {len(opens) - OPEN_MAX} newer: `python {TOOLS}/ledger.py --open`")
     asked = sorted((e for e in rows if e.get("kind") == "question" and e.get("state") == "open"
@@ -233,7 +233,7 @@ def selftest():
 
     now = dt.datetime(2026, 10, 23, 18, 0, tzinfo=dt.timezone.utc)
     rows = [
-        {"id": "a", "ts": "2026-10-21T21:22:00Z", "session": "0830382a-x", "ccd": "local_abc", "title": "Rate limits",
+        {"id": "5e1f00a2-planted", "ts": "2026-10-21T21:22:00Z", "session": "0830382a-x", "ccd": "local_abc", "title": "Rate limits",
          "source": "typed", "kind": "request", "state": "open", "text": "research the planted durable fix"},
         {"id": "b", "ts": "2026-10-03T03:31:00Z", "session": "4b32273c-x", "title": "Mac setup", "source": "card",
          "kind": "request", "state": "open", "text": "Later", "question": "Port the planted backup job?"},
@@ -265,7 +265,7 @@ def selftest():
     check("the generated-file header and the generator command come first",
           lines[0].startswith("<!-- Generated file") and "digest.py" in lines[3] and "ledger.py" in lines[3])
     i_b, i_a = text.find("Port the planted backup"), text.find("research the planted durable")
-    check("open requests are listed oldest first, with their words", 0 < i_b < i_a)
+    check("open requests are listed oldest first, with their words and the id a card names", 0 < i_b < i_a and "`5e1f00a2` " in text)
     check("a session with an app id links into the desktop app; one without shows its title and date",
           "(claude://claude.ai/epitaxy/local_abc)" in text and "Mac setup (2026-10-03, session 4b32273c)" in text)
     check("a reply with a marker shows your words, not the marker or the agent text it quotes",

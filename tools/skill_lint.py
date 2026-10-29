@@ -29,23 +29,29 @@ Checks (a FAIL exits 1; a WARN or a report line does not):
                    compile or has no --help (its tools check). Files resolve against the config key
                    workspace.root, else the project folder.
   8. NEW SKILLS  - with --only: FAIL when the commit adds a skills/<name>/SKILL.md and no eval suite
-                   has a passing receipt for that folder's sha (agent_gate_stale.py's suites folder,
-                   config key agent_gate.suites; not run when that is unset). agent_gate_stale.py
-                   lists the rest.
+                   has a passing receipt for that folder's sha, nor a unit.json that accepts that sha
+                   without one (agent_gate_stale.py's suites folder, config key agent_gate.suites; not
+                   run when that is unset). agent_gate_stale.py lists the rest.
   9. TAGS        - with --only: FAIL when a staged skill, agent or CLAUDE.md file adds a line with a
-                   dated attribution ("(the user, 2026-10-17)", "user 10/24:"), a star mark (U+2605),
-                   or capitals used for emphasis (NEVER, ALWAYS, MUST, MANDATORY, CRITICAL,
-                   IMPORTANT). Fenced and inline code don't count; lines already there pass until
-                   someone edits them.
+                   dated attribution (`(the user, 2026-10-17)`, `user 10/24:`), a star mark (U+2605),
+                   or capitals used for emphasis (`NEVER`, `ALWAYS`, `MUST`, `MANDATORY`, `CRITICAL`,
+                   `IMPORTANT`); or a staged .py in a folder named tools adds one to its module
+                   docstring (its --help), or a tools/README.md to a row. There a date beside a
+                   past-tense story verb (asked, said, ruled) counts too, and a section name opening a
+                   line (`NEVER DOWNLOADED.`) is not emphasis. Fenced and inline code don't count;
+                   lines already there pass until someone edits them.
+ 10. WORKSPACE MAP - report only, full run: the marked and story lines of the workspace map
+                   (config workspace.root and workspace.map, default WORKSPACE.md), which a working
+                   folder outside any repo keeps out of every commit check.
 
 Usage:  python tools/skill_lint.py [skills_dir]      exit 1 on any FAIL (default ~/.claude/skills)
         python tools/skill_lint.py --selftest        planted skills and lines: the startup total
                                                      counts a project skill and skips one set
                                                      name-only; topic ownership; the tags
 
-What loads at startup is read from: ~/.claude/agents (SKILL_LINT_AGENTS), the current project's
-.claude/skills (SKILL_LINT_PROJECT_SKILLS) less any skill its .claude/settings*.json skillOverrides set
-name-only or off (SKILL_LINT_SETTINGS_DIR), and ~/.claude/CLAUDE.md, <project>/CLAUDE.md and the
+What loads at startup is read from: ~/.claude/agents (SKILL_LINT_AGENTS), the skills folder and the
+current project's .claude/skills (SKILL_LINT_PROJECT_SKILLS), each less any skill the project's
+.claude/settings*.json skillOverrides set name-only or off (SKILL_LINT_SETTINGS_DIR), and ~/.claude/CLAUDE.md, <project>/CLAUDE.md and the
 project's memory index MEMORY.md (SKILL_LINT_ALWAYS, a path list). The project is $CLAUDE_PROJECT_DIR,
 else the folder you run in.
 """
@@ -54,6 +60,7 @@ import os, re, sys, glob, itertools, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+import cc_logs  # noqa: E402  cc_logs.redact: an 8-gram check 2 prints can hold a clone URL's token
 
 # A console that is not UTF-8 would die mid-report with a UnicodeEncodeError on a glyph in a skill,
 # which reads like a lint failure and is not one.
@@ -261,8 +268,9 @@ SUITES = os.environ.get("SKILL_LINT_SUITES") or os.path.expanduser(_config("agen
 def new_skill_gate(staged):
     """8. NEW SKILLS, commit mode: a SKILL.md this commit adds is refused unless a suite in SUITES
     names its folder and holds a passing receipt for the folder's current sha (agent_gate_stale.py's
-    hash). An existing skill is listed STALE or UNTESTED by agent_gate_stale.py instead, and is not
-    refused here."""
+    hash), or a unit.json accepts that sha without a suite (agent_gate_stale.py's ACCEPTED). An
+    existing skill is listed STALE or UNTESTED by agent_gate_stale.py instead, and is not refused
+    here."""
     new = []
     for p in staged:
         p = os.path.abspath(p)
@@ -288,6 +296,7 @@ def new_skill_gate(staged):
                 unit = json.load(open(unit_json, encoding="utf-8"))
                 if os.path.realpath(os.path.expanduser(unit["file"])) != os.path.realpath(folder):
                     continue
+                ok |= (unit.get("accepted") or {}).get("sha") == sha
                 rec = os.path.join(os.path.dirname(unit_json), "receipts.jsonl")
                 ok |= any(json.loads(l).get("unit_sha") == sha and json.loads(l).get("pass")
                           for l in open(rec, encoding="utf-8") if l.strip())
@@ -313,9 +322,10 @@ def added_lines(path):
 
 # 9. TAGS. A dated attribution is who said it and when: "(<who>, <date>)" with anything before the
 # who inside the brackets, or "<who> <date>:" opening a quote. <who> is any one word, a name or a
-# role, so the pattern needs no list of names.
+# role, so the pattern needs no list of names; a word that marks a measurement ("measured
+# 2026-10-26: 182 runs") is not a who.
 _DATE = r"(?:20\d\d-\d\d-\d\d|\d{1,2}/\d{1,2}(?:/\d{2,4})?)"
-_WHO = r"[A-Za-z][\w'.-]*"
+_WHO = r"(?!(?:measured|re-verified|verified|checked|tested|counted|read|of)\b)[A-Za-z][\w'.-]*"
 TAGS = [
     ("a dated attribution", re.compile(r"\([^()]{0,60}?\b" + _WHO + r",\s*" + _DATE + r"\b[^()]{0,40}\)"
                                        + r"|\b" + _WHO + r",? " + _DATE + r"\s*:")),
@@ -324,16 +334,68 @@ TAGS = [
 ]
 
 
-def tag_lines(text):
-    """[(tag, line)] for the lines of `text` that carry a TAGS mark outside fenced and inline code."""
+# A tool docstring's section name: an all-caps label opening the line and ending in . or :
+_HEADING = re.compile(r"^\s*[A-Z][A-Z0-9 '/-]*[.:](?=\s|$)")
+
+
+def tag_lines(text, headings=False):
+    """[(tag, line)] for the lines of `text` that carry a TAGS mark outside fenced and inline code. With
+    headings, a line's opening section name ("NEVER DOWNLOADED.") is not read as emphasis."""
     out, fence = [], False
     for ln in text.split("\n"):
         if ln.lstrip().startswith("```"):
             fence = not fence
             continue
         prose = "" if fence else re.sub(r"`[^`]*`", "", ln)
+        if headings:
+            prose = _HEADING.sub("", prose, count=1)
         out += [(name, ln.strip()) for name, rx in TAGS if rx.search(prose)]
     return out
+
+
+# A past-tense story verb, unless a present passive ("is no longer asked") makes it a mechanism. A README
+# passage marked *Measured*, to the end of its cell, is kept word for word, so its verbs aren't read.
+_STORY_VERB = re.compile(r"\b(?:asked|said|ruled|told|wanted|chose|picked|decided|complained|noticed|insisted)\b", re.I)
+_PRESENT_PASSIVE = re.compile(r"\b(?:is|are|be|being)\b(?:\W+\w+){0,2}?\W+$", re.I)
+_MEASURED = re.compile(r"\*[Mm]easured\*(?:[^|]|(?<=\\)\|)*")
+
+
+def story_lines(text):
+    """[(tag, line)]: check 9's marks, plus a date on the same line as a past-tense story verb (asked,
+    said, ruled). A date alone passes, so a measured line keeps its date, and so does a name beside one."""
+    out, fence = list(tag_lines(text, headings=True)), False
+    for ln in text.split("\n"):
+        if ln.lstrip().startswith("```"):
+            fence = not fence
+            continue
+        prose = "" if fence else re.sub(r"`[^`]*`", "", _MEASURED.sub("", ln))
+        story = any(not _PRESENT_PASSIVE.search(prose[:m.start()]) for m in _STORY_VERB.finditer(prose))
+        if re.search(_DATE, prose) and story and not any(line == ln.strip() for _, line in out):
+            out.append(("a date beside a story verb", ln.strip()))
+    return out
+
+
+def docstring_added(path):
+    """The lines a commit adds inside a staged .py file's module docstring, its --help text; the whole
+    docstring when nothing is staged for it."""
+    import ast
+    src = open(path, encoding="utf-8", errors="replace").read()
+    try:
+        first = ast.parse(src).body[:1]
+    except SyntaxError:
+        return ""
+    if not (first and isinstance(first[0], ast.Expr) and isinstance(getattr(first[0].value, "value", None), str)):
+        return ""
+    lo, hi, lines = first[0].lineno, first[0].end_lineno, src.split("\n")
+    r = subprocess.run(["git", "-C", os.path.dirname(path), "diff", "--cached", "-U0", "--", path],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not r.stdout.strip():
+        return "\n".join(lines[lo - 1:hi])
+    keep = set()
+    for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", r.stdout, re.M):
+        s, c = int(m.group(1)), int(m.group(2) or 1)
+        keep |= {n for n in range(s, s + c) if lo <= n <= hi}
+    return "\n".join(lines[n - 1] for n in sorted(keep))
 
 
 def instruction_file(path):
@@ -342,17 +404,47 @@ def instruction_file(path):
     return path.endswith(".md") and ("skills" in parts or "agents" in parts or parts[-1] == "CLAUDE.md")
 
 
+def tool_help_file(path):
+    """A .py or README.md directly inside a folder named tools: what they hold is a tool's help."""
+    parts = path.replace(os.sep, "/").split("/")
+    return len(parts) > 1 and parts[-2] == "tools" and (parts[-1].endswith(".py") or parts[-1] == "README.md")
+
+
 def added_tags(staged):
     """9. TAGS, commit mode: a staged instruction file may not add a line with a dated attribution, a
     star or capitals for emphasis (templates/writing-instructions.md, 'What an instruction looks
-    like')."""
+    like'). A staged tool may not add one to its module docstring (its --help), nor tools/README.md to
+    a row, and there a date beside a past-tense story verb counts too: the help says what the tool does
+    and why, as a mechanism; the story goes in the commit message."""
     out = []
     for p in staged:
         q = os.path.abspath(p)
-        if instruction_file(q) and os.path.exists(q):
+        if not os.path.exists(q):
+            continue
+        if instruction_file(q):
             out += [f"{p}: adds {tag}: \"{line[:90]}\". Say the rule plainly; the date and who said it go "
                     f"in the record" for tag, line in tag_lines(added_lines(q))]
+        elif tool_help_file(q):
+            text = docstring_added(q) if q.endswith(".py") else added_lines(q)
+            out += [f"{p}: adds {tag} to its help: \"{line[:90]}\". Say what it does and why; the story goes "
+                    f"in the commit message" for tag, line in story_lines(text)]
     return out
+
+
+def workspace_story():
+    """10. WORKSPACE MAP: a working folder outside any repo has no commit to refuse a line in its map,
+    so the full run reports the map's marked and story lines instead. Not run without workspace.root."""
+    root = _config("workspace", "root")
+    if ONLY is not None or not root:
+        return
+    path = os.path.join(os.path.expanduser(root), _config("workspace", "map") or "WORKSPACE.md")
+    if not os.path.exists(path):
+        return
+    found = story_lines(read(path))
+    print(f"\n10. WORKSPACE MAP ({os.path.basename(path)}: reported, not refused)\n   {'PASS' if not found else 'INFO'}  "
+          f"{len(found)} line(s) with a mark, or a date beside a story verb")
+    for tag, line in found[:20]:
+        print(f"         {tag}: {line[:110]}")
 
 
 def miss_key(miss):
@@ -424,7 +516,7 @@ def main():
             warns.append(f"{a} <-> {b}: {len(sh)} shared 8-grams")
             print(f"   WARN  {a} <-> {b}  {len(sh)} shared 8-grams")
             for g in list(sh)[:3]:
-                print(f"         \"{' '.join(g)}\"")
+                print(f"         \"{cc_logs.redact(' '.join(g))}\"")
     if not found:
         print("   PASS  no verbatim overlap between any two SKILL.md files")
 
@@ -482,8 +574,8 @@ def main():
 
     print("\n6. INSTRUCTION BUDGETS")
     before = len(fails)
-    startup = 0
-    for n, p in paths.items():
+    startup, overrides = 0, skill_overrides()   # a skill set name-only or off loads no description
+    for n, p in ((n, p) for n, p in paths.items() if overrides.get(n) not in HIDDEN):
         w = desc_words(read(p))
         startup += w
         if w > SKILL_DESC_MAX:
@@ -529,6 +621,7 @@ def main():
         fails += staged_references(ONLY)
         fails += new_skill_gate(ONLY)
         fails += added_tags(ONLY)
+    workspace_story()
 
     print("\n" + "=" * 70)
     for f in fails:
@@ -541,9 +634,9 @@ def main():
 
 
 def selftest():
-    """Run this file on planted folders and read its output. A user skill (5 words), a project skill (7)
-    and a project skill set name-only (9): the startup total must be 12. Reading the user folder alone
-    gives 5; ignoring the override gives 21. A registered topic restated in a second skill must FAIL,
+    """Run this file on planted folders and read its output. User skills of 5 words and 11 set name-only,
+    project skills of 7 and 9 set name-only: the startup total must be 12. The user folder alone gives
+    5; ignoring the project override gives 21, and ignoring the user one 23. A registered topic restated in a second skill must FAIL,
     and the same text in a section that cites the owner must not. Check 9 must catch each planted bad
     line, pass each good one, and read only the added line of a staged edit."""
     import json, tempfile
@@ -555,11 +648,12 @@ def selftest():
                 f.write(f"---\nname: {name}\ndescription: {' '.join(['word'] * words)}\n---\n{body}")
         user, proj = os.path.join(tmp, "user"), os.path.join(tmp, "proj", ".claude", "skills")
         skill(user, "u-skill", 5)
+        skill(user, "v-skill", 11)
         skill(proj, "p-skill", 7)
         skill(proj, "q-skill", 9)
         os.makedirs(os.path.join(tmp, "agents"))
         with open(os.path.join(tmp, "proj", ".claude", "settings.json"), "w") as f:
-            json.dump({"skillOverrides": {"q-skill": "name-only"}}, f)
+            json.dump({"skillOverrides": {"q-skill": "name-only", "v-skill": "name-only"}}, f)
         open(os.path.join(tmp, "empty.md"), "w").close()
         env = dict(os.environ, SKILL_LINT_PROJECT_SKILLS=proj, SKILL_LINT_SETTINGS_DIR=os.path.join(tmp, "proj"),
                    SKILL_LINT_AGENTS=os.path.join(tmp, "agents"), SKILL_LINT_ALWAYS=os.path.join(tmp, "empty.md"),
@@ -570,8 +664,19 @@ def selftest():
         got = int(m.group(1)) if m else None
         ok = got == 12
         ok_all &= ok
-        print(("PASS" if ok else "FAIL") + f" startup total counts the project skill and skips the name-only one: "
-              f"got {got}, want 12 (user folder alone 5; override ignored 21)")
+        print(("PASS" if ok else "FAIL") + f" startup total counts the project skill and skips the name-only ones: "
+              f"got {got}, want 12 (user folder alone 5; project override ignored 21; user override ignored 23)")
+
+        # Check 2 on two skills that share a clone line holding a token, built here so no file holds one.
+        two, fake = os.path.join(tmp, "two"), "gldt-" + "Zq7x" * 6
+        for n in ("r-skill", "s-skill"):
+            skill(two, n, 1, f"run git clone --depth 1 https://deploy-token-1:{fake}@host.example/x.git "
+                             "into the tools folder now\n")
+        out2 = subprocess.run([sys.executable, os.path.abspath(__file__), two], env=env, capture_output=True,
+                              text=True, encoding="utf-8").stdout
+        ok = "[redacted]" in out2 and fake.lower() not in out2.lower() and "shared 8-grams" in out2
+        ok_all &= ok
+        print(("PASS" if ok else "FAIL") + " check 2 prints a shared 8-gram that holds a token with the token redacted")
 
         topics = os.path.join(tmp, "topics")
         os.makedirs(os.path.join(topics, "refs"))
@@ -594,7 +699,7 @@ def selftest():
         # edit read.
         bad = ["- **Design changes (the user, 2026-10-17):** a frame change is a thread.", "- ★ Read it first.",
                "Priority runs highest first (per the lead, 10/14).", "Drafts wait (no timed card; the user, 2026-10-25).",
-               "You MUST search before a create.", 'user 10/24: "can you do this now"']
+               "You MUST search before a create.", 'user 10/24: "can you do this now"', "NEVER: push to main."]
         good = ["Run `ping.py --since 2026-10-07T23:25`.", "A run that did not start is DID NOT RUN.",
                 "See `_archive/open-threads-2026-10-20/`.", "Each finding is a BLOCKER or POLISH.",
                 "Crop to the top half of the frame (about 1/2 of its height).", "```\nNEVER inside a fence\n```"]
@@ -619,6 +724,76 @@ def selftest():
         ok_all &= ok
         print(("PASS" if ok else "FAIL") + f" tags: {len(caught)} of {len(bad)} bad lines caught, {len(passed)} of "
               f"{len(good)} good lines passed, staged edit gives {len(staged)} finding(s), want 1 (the added star)")
+
+        # Check 8: a new skill passes when a unit.json accepts its folder's sha, and is refused otherwise.
+        from agent_gate_stale import file_sha
+        r2 = os.path.join(tmp, "r2")
+        y = os.path.join(r2, "skills", "y")
+        os.makedirs(y)
+        with open(os.path.join(y, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: y\n---\nbody\n")
+        subprocess.run(["git", "init", "-q", r2], check=True)
+        subprocess.run(["git", "-C", r2, "add", "-A"], check=True)
+        s8 = os.path.join(tmp, "suites8", "y")
+        os.makedirs(s8)
+        global SUITES
+        real = SUITES
+        SUITES = os.path.dirname(s8)
+        try:
+            results8 = []
+            for sha in (file_sha(y), "0000000"):
+                with open(os.path.join(s8, "unit.json"), "w") as fh:
+                    json.dump({"unit": "y", "file": y, "accepted": {"sha": sha}}, fh)
+                results8.append(len(new_skill_gate([os.path.join(y, "SKILL.md")])))
+        finally:
+            SUITES = real
+        ok = results8 == [0, 1]
+        ok_all &= ok
+        print(("PASS" if ok else "FAIL") + f" new skill: accepted at its sha gives {results8[0]} finding(s), want 0; "
+              f"accepted at another sha gives {results8[1]}, want 1")
+
+        # Check 9 on tool help: story lines caught, measured and command lines passed, and in a staged tool
+        # only the lines it adds to its module docstring are read.
+        hbad = ["WHY. On 10/24 the user asked for one line per tool.",
+                "The lead ruled 2026-10-20 that every row names its owner.",
+                "It runs first (the lead, 10/14).", "The help said nothing until 10/22, when it was rewritten.",
+                "★ Read the README first.", "You MUST pass --since.", "It was decided on 2026-10-14 to drop it.",
+                "GUARD. You MUST pass --since.", "The token value is NEVER printed, logged, or written anywhere.",
+                "| `t.py` | the user asked for it on 10/24. *Measured* 2026-10-22: 3 of 3 | z |"]
+        # Lines of the shapes an earlier version of this rule flagged: a measurement with its date, a
+        # date opening a wrapped line, and a section name in capitals.
+        hgood = ["Exit 0 when every unit passes; measured 2026-10-26: 182 runs, 2 limit hits.",
+                 "python tools/ping.py --since 2026-10-07T23:25", "A run before 10/26 has no digest.",
+                 "Reads ADO and prints N of M.", "Each finding is a BLOCKER or POLISH.",
+                 "                 2026-10-18 (grade() says why the gate is no longer asked). There is no small-gap",
+                 "(2026-10-14). What can be read end to end is the user-authored subset, roughly 0.4% of the bytes",
+                 "2026-10-18. grade() explains why the gate is no longer asked. There is no small-gap",
+                 "NEVER DOWNLOADED. The run sets this process tree's I/O policy so opening a cloud placeholder fails",
+                 "NEVER: a dirty, unmerged or recently used worktree or branch; a remote; a session log that is not",
+                 "THE TOKEN IS NEVER WRITTEN INTO THE HTML. It is read server-side only (the environment,",
+                 "| `t.py` | edits. *Measured* 2026-10-22: the stored version was picked as the closest \\| ok | z |"]
+        hc = [b for b in hbad if story_lines(b)]
+        hp = [g for g in hgood if not story_lines(g)]
+        tdir = os.path.join(tmp, "work", "tools")
+        os.makedirs(tdir)
+        tool = os.path.join(tdir, "t.py")
+        with open(tool, "w", encoding="utf-8") as fh:
+            fh.write('"""t.py - prints N of M.\n\nExit 0 when done.\n"""\nimport sys\n')
+        gt = ["git", "-C", tdir, "-c", "user.name=t", "-c", "user.email=t@localhost",
+              "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={os.devnull}"]
+        subprocess.run(["git", "init", "-q", tdir], check=True)
+        subprocess.run(gt + ["add", "-A"], check=True)
+        subprocess.run(gt + ["commit", "-qm", "t"], check=True)
+        with open(tool, "w", encoding="utf-8") as fh:
+            fh.write('"""t.py - prints N of M.\n\nThe user asked for this on 10/24.\nExit 0 when done.\n"""\n'
+                     'import sys\n# The user asked for this on 10/24.\n')
+        subprocess.run(gt + ["add", "-A"], check=True)
+        tool_found = added_tags([tool])
+        ok = len(hc) == len(hbad) and len(hp) == len(hgood) and len(tool_found) == 1 and "to its help" in tool_found[0]
+        ok_all &= ok
+        print(("PASS" if ok else "FAIL") + f" tool help: {len(hc)} of {len(hbad)} story lines caught, {len(hp)} of "
+              f"{len(hgood)} measured lines passed; a staged tool gives {len(tool_found)} finding(s), want 1 (the "
+              f"docstring line, not the same words in a comment)")
     return 0 if ok_all else 1
 
 
