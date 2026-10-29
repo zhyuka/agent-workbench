@@ -29,8 +29,9 @@ will do.
 
 **Point it at a fresh production build, not the dev server.** Build, serve the output on a port of
 its own, and audit that URL. A long-running dev server can serve stale CSS with fresh HTML. Never
-kill a dev server someone else is using. **Always pass the URL** to every probe: a default URL in a
-script audits whatever page that is, not the one you changed.
+kill a dev server someone else is using. When no fresh build of this tree is serving, report the
+pass DID NOT RUN; never audit the dev server in its place. **Always pass the URL** to every probe: a
+default URL in a script audits whatever page that is, not the one you changed.
 
 Every probe follows one exit convention: 0 clean, 1 findings, 2 could not run. It asserts its own
 preconditions (the page loaded, the viewport is the one asked for, the selector matched at least one
